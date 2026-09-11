@@ -6,7 +6,8 @@
 | | |
 |---|---|
 | **Status** | Konzept, vor M0 |
-| **Dokumentversion** | 0.1 (September 2026) |
+| **Dokumentversion** | 0.2 (September 2026) |
+| **Änderungen in 0.2** | Race Conditions im Manifest-Lebenszyklus behoben (10.6, 10.8, 11); Sprachen und Werkzeuge außerhalb des Go-Kerns (15.2); formales Modell als Meilenstein M3.5 |
 | **Sprache** | Go (aktuelle stabile Version, mindestens 1.24 wegen `crypto/hkdf`) |
 | **Lizenz (geplant)** | Apache 2.0 |
 
@@ -28,7 +29,7 @@
 12. [Leistungs- und Speichermodell](#12-leistungs--und-speichermodell)
 13. [Konfiguration und CLI](#13-konfiguration-und-cli)
 14. [Projektstruktur und Go-APIs](#14-projektstruktur-und-go-apis)
-15. [Technologie-Stack](#15-technologie-stack)
+15. [Technologie-Stack und Sprachen](#15-technologie-stack-und-sprachen)
 16. [Qualitätssicherung](#16-qualitätssicherung)
 17. [Betrieb und Observability](#17-betrieb-und-observability)
 18. [Meilensteine](#18-meilensteine)
@@ -477,7 +478,7 @@ Für den Upstream verwendet blindbucket kein vollständiges SDK, sondern `net/ht
 | PutObject | Verschlüsseln | M2 |
 | GetObject (vollständig) | Entschlüsseln | M2 |
 | HeadObject | Größe umrechnen, `bb-`-Metadaten entfernen | M2 |
-| DeleteObject | Durchreichen; bei Multipart zusätzlich Manifest entfernen | M2 / M4 |
+| DeleteObject | Durchreichen; bei Multipart zusätzlich das vorher beobachtete Manifest entfernen (10.8) | M2 / M4 |
 | GetObject mit Range | Range-Mapping | M3 |
 | ListObjectsV2, ListObjects | Größen umrechnen, reservierten Präfix filtern | M3 |
 | DeleteObjects | Durchreichen, reservierte Keys ablehnen | M3 |
@@ -529,8 +530,10 @@ sequenceDiagram
     C->>P: CompleteMultipartUpload mit Token und Partliste
     P->>S: ListParts U
     P->>P: Part-Größen prüfen, Manifest erzeugen
+    P->>S: HEAD Key, bisherige Manifest-ID merken
     P->>S: PUT Manifest unter .blindbucket/m/
     P->>S: CompleteMultipartUpload U
+    P->>S: DELETE bisheriges Manifest
     P->>C: 200 OK
 ```
 
@@ -576,11 +579,12 @@ Manifest = "BBM1" || lp(bucket) || lp(key) || ManifestID(16) || uint16_be(M)
 **Reihenfolge beim Abschluss:**
 
 1. `ListParts` am Upstream (paginiert, bis zu 10 000 Parts) liefert die Chiffretextgrößen; der Proxy rechnet sie in Klartextgrößen um und prüft die Regeln aus 10.5.
-2. Manifest schreiben.
-3. `CompleteMultipartUpload` am Upstream.
-4. Veraltete Manifeste früherer Versionen desselben Keys löschen (Best Effort).
+2. HEAD auf den Key: Ist das aktuell sichtbare Objekt ein Multipart-Objekt, merkt sich der Proxy dessen Manifest-ID.
+3. Manifest schreiben.
+4. `CompleteMultipartUpload` am Upstream.
+5. Nur wenn Schritt 4 erfolgreich war: genau das Manifest mit der in Schritt 2 gemerkten ID löschen (Best Effort).
 
-Weil die Manifest-ID schon beim Erzeugen des Uploads in den Objektmetadaten steht, kann das neue Manifest vor dem Abschluss geschrieben werden, ohne das alte Objekt zu beeinträchtigen. Es gibt kein Zeitfenster, in dem ein sichtbares Objekt ohne gültiges Manifest existiert. Verwaiste Manifeste (etwa nach Abbruch zwischen Schritt 2 und 3) räumt `blindbucket gc` auf; sie enthalten keinen Klartext.
+Weil die Manifest-ID schon beim Erzeugen des Uploads in den Objektmetadaten steht, kann das neue Manifest vor dem Abschluss geschrieben werden, ohne das alte Objekt zu beeinträchtigen. Schritt 5 löscht bewusst nicht „alle anderen Manifeste dieses Keys“: Das würde die bereits geschriebenen Manifeste paralleler Uploads auf denselben Key treffen (Abschnitt 10.8). Verwaiste Manifeste räumt `blindbucket gc` nach den Regeln aus 10.8 auf; sie enthalten keinen Klartext.
 
 **Download eines Multipart-Objekts:**
 
@@ -599,6 +603,41 @@ Der gesamte Zustand eines Uploads steckt im Token (DEK, Manifest-ID, Upstream-Up
 
 Abgebrochene Uploads ohne `AbortMultipartUpload` belegen beim Anbieter Speicher. Empfohlen wird eine Lifecycle-Regel für unvollständige Multipart-Uploads im Bucket; das README beschreibt sie.
 
+### 10.8 Nebenläufigkeit und Lebenszyklus der Manifeste
+
+Version 0.1 dieses Konzepts enthielt zwei Race Conditions mit demselben Ergebnis: ein sichtbares Multipart-Objekt ohne Manifest. Ein solches Objekt ist nicht mehr lesbar. Die Daten sind nicht verloren, weil sie sich mit dem DEK rekonstruieren lassen, aber jeder GET schlägt fehl.
+
+| Race | Ablauf |
+|---|---|
+| `gc` gegen Complete | Upload B hat sein Manifest geschrieben, aber noch nicht abgeschlossen. `gc` sieht, dass die Manifest-ID nicht zum sichtbaren Objekt passt, und löscht das Manifest. Danach schließt B ab. |
+| Aufräumen gegen parallelen Upload | Uploads A und B laufen auf denselben Key, beide haben ihr Manifest geschrieben. A schließt ab und löscht „alle anderen Manifeste des Keys“, darunter das von B. Danach schließt B ab. |
+
+Keiner der beiden Fehler steckt in einem einzelnen Request. Beide entstehen erst in der Verschränkung mehrerer Abläufe auf verschiedenen Instanzen. Solche Fehler finden Code-Reviews und Integrationstests schlecht, formale Modelle dagegen gut (Abschnitt 15.2).
+
+**Invariante I1:** Jedes sichtbare Multipart-Objekt hat ein Manifest mit seiner Manifest-ID.
+
+**Regeln:**
+
+- **R1 – Frische Manifest-ID.** Jede Operation, die ein Multipart-Objekt sichtbar macht (Upload, Copy, Rotation), erzeugt eine neue Manifest-ID und schreibt ein eigenes Manifest. Manifeste werden nie zwischen Objektversionen geteilt.
+- **R2 – Schreiben vor Sichtbarkeit.** Das Manifest wird geschrieben, bevor die Operation das Objekt sichtbar macht.
+- **R3 – Löschen nur nach Beobachtung.** Ein Request löscht höchstens das Manifest, dessen ID er *vor* seiner eigenen, erfolgreich abgeschlossenen Ersetzung oder Löschung am sichtbaren Objekt gelesen hat. Weil eine Manifest-ID nach R1 genau zu einer Objektversion gehört und diese Version nicht erneut sichtbar werden kann, trifft das Löschen nie das Manifest des danach sichtbaren Objekts.
+- **R4 – `gc` in fester Reihenfolge, pro Key:**
+  1. Manifeste unter `.blindbucket/m/<hash>/` listen; den Key liest `gc` aus dem Manifest selbst.
+  2. `ListMultipartUploads` für den Key: Existiert ein offener Upload, wird der Key übersprungen.
+  3. HEAD auf das Objekt, aktuelle Manifest-ID lesen.
+  4. Aus der Liste von Schritt 1 nur Manifeste löschen, deren ID nicht der aktuellen entspricht **und** die älter als eine Mindestfrist sind (Default: Lifecycle-Frist für unvollständige Uploads plus 24 Stunden).
+
+**Warum R4 sicher ist:** Ein in Schritt 1 gelistetes Manifest stammt von einer Operation, die zu diesem Zeitpunkt entweder noch lief oder schon abgeschlossen war. Läuft sie in Schritt 2 noch, wird der Key übersprungen. Ist sie abgeschlossen, kann sie ihr Objekt nicht nachträglich erneut sichtbar machen: Entweder ist ihr Manifest in Schritt 3 das aktuelle, oder es ist tatsächlich verwaist. Die Mindestfrist sichert zusätzlich ab, falls eine der Annahmen beim Anbieter nicht hält.
+
+Überschreibt ein Single-Part-PUT ein Multipart-Objekt, bleibt dessen Manifest verwaist zurück, bis `gc` es entfernt. Das spart einen HEAD auf dem häufigsten Schreibpfad.
+
+**Annahmen über den Upstream:**
+
+- Starke Read-after-Write-Konsistenz für HEAD, LIST und `ListMultipartUploads`. AWS S3 garantiert das; für R2 und MinIO wird es in der Kompatibilitätsmatrix geprüft.
+- Eine abgeschlossene oder abgebrochene UploadId kann kein Objekt erneut sichtbar machen.
+
+**Status:** Diese Regeln sind durch Nachdenken hergeleitet, nicht bewiesen. Das TLA+-Modell aus Meilenstein M3.5 prüft I1 und die Rotations-Invariante I2 (11.2) über alle Verschränkungen, einschließlich Abstürzen nach jedem Schritt. Erst wenn der Model Checker kein Gegenbeispiel findet, wird ADR-010 angenommen.
+
 ---
 
 ## 11. Kopieren und Schlüsselrotation
@@ -611,7 +650,7 @@ Ein Kopieren auf einen anderen Key erfordert nur neue Metadaten, keine Neuversch
 2. DEK mit dem AAD des Ziels und dem aktiven KEK neu wrappen.
 3. Serverseitig kopieren mit `x-amz-metadata-directive: REPLACE`, den neuen `bb-`-Metadaten und den übrigen Metadaten der Quelle. `x-amz-copy-source-if-match` mit dem ETag aus Schritt 1 verhindert, dass zwischenzeitlich überschriebene Objekte mit falschen Metadaten kopiert werden.
 
-**Multipart-Objekte** werden nie per einfachem CopyObject kopiert, weil das Ergebnis ein Single-Part-Objekt ohne `-M`-Suffix im ETag wäre und die Größenarithmetik bräche. Stattdessen erzeugt der Proxy einen Multipart-Upload und kopiert per `UploadPartCopy` exakt dieselben Byte-Bereiche wie im Original. Das Manifest wird für den neuen Key neu geschrieben. Dieser Weg ist ohnehin nötig, weil CopyObject auf 5 GiB begrenzt ist.
+**Multipart-Objekte** werden nie per einfachem CopyObject kopiert, weil das Ergebnis ein Single-Part-Objekt ohne `-M`-Suffix im ETag wäre und die Größenarithmetik bräche. Stattdessen erzeugt der Proxy einen Multipart-Upload und kopiert per `UploadPartCopy` exakt dieselben Byte-Bereiche wie im Original. Die Kopie erhält nach R1 eine neue Manifest-ID und ein eigenes Manifest, das vor dem Abschluss geschrieben wird; das Manifest eines zuvor am Ziel sichtbaren Objekts wird nach R3 entfernt (10.8). Dieser Weg ist ohnehin nötig, weil CopyObject auf 5 GiB begrenzt ist.
 
 ### 11.2 Rotation
 
@@ -622,6 +661,8 @@ blindbucket rotate s3://backups/2025/ --to-kid 2026-09 --concurrency 16
 ```
 
 Der Befehl listet den Präfix, überspringt Objekte, die bereits den Ziel-KEK tragen, und ist damit idempotent und nach einem Abbruch fortsetzbar. Übertragen werden nur Metadaten; die Gigabytes bleiben beim Anbieter. Das Ergebnis wird mit Anzahl, Dauer und Fehlern ausgegeben.
+
+**Nebenläufigkeit:** Rotation liest ein Objekt und schreibt es später zurück. Überschreibt ein Client das Objekt dazwischen, darf die Rotation den neueren Stand nicht mit der alten Version ersetzen (**Invariante I2: Rotation verursacht keinen Lost Update**). `x-amz-copy-source-if-match` schützt nur das Lesen der Quelle, nicht das Schreiben am Ziel. Rotation schreibt deshalb bedingt: Der abschließende Schreibvorgang trägt `If-Match` mit dem ETag, den die Rotation beim Lesen gesehen hat. AWS S3 unterstützt das für PutObject und CompleteMultipartUpload; Single-Part-Objekte werden dafür als Multipart-Upload mit genau einem `UploadPartCopy` rotiert, die Größenarithmetik bleibt mit M = 1 identisch. Ob R2 und MinIO bedingte Schreibvorgänge unterstützen, klärt die Kompatibilitätsmatrix. Wo sie fehlen, startet `rotate` nur mit dem expliziten Flag `--allow-unconditional`, und die Dokumentation verlangt, dass währenddessen keine Schreibzugriffe auf den Präfix laufen.
 
 Ehrliche Einordnung: Rotation erneuert den KEK. Der DEK eines Objekts bleibt gleich. Das schützt gegen einen kompromittierten oder auslaufenden KEK, nicht gegen einen kompromittierten DEK.
 
@@ -717,7 +758,7 @@ blindbucket encrypt   --keyring keyring.json  < datei       > datei.bb
 blindbucket decrypt   --keyring keyring.json  < datei.bb    > datei
 blindbucket inspect   s3://bucket/key         # Header, KEK-ID, Größen, Manifest – ohne Entschlüsselung
 blindbucket rotate    s3://bucket/prefix --to-kid 2026-09
-blindbucket gc        s3://bucket              # verwaiste Manifeste entfernen
+blindbucket gc        s3://bucket              # verwaiste Manifeste entfernen (Regeln aus 10.8)
 ```
 
 `encrypt` und `decrypt` sind das lokale MVP aus M1. Das Dateiformat besteht aus einem kleinen Envelope (`"BBF1"`, KEK-ID, gewrappter DEK mit AAD-Kontext `"file"`) gefolgt von genau einem Segment. `inspect` ist ein Debugging-Werkzeug, das für Reviewer das Format sichtbar macht.
@@ -747,7 +788,9 @@ blindbucket/
 │   ├── THREAT_MODEL.md
 │   └── COMPATIBILITY.md        # Client-Matrix
 ├── testdata/vectors/           # Known-Answer-Testvektoren zum Format
-├── test/integration/           # testcontainers-go: MinIO + echte Clients
+├── test/integration/           # testcontainers-go: MinIO + echte Clients (boto3-Szenarien in Python)
+├── spec/tla/                   # TLA+-Modell der Manifest- und Rotationsabläufe
+├── ref/python/                 # unabhängiger Referenz-Decoder, nur nach FORMAT.md
 ├── bench/                      # warp-Szenarien, RSS-Messung, Auswertung
 ├── deploy/                     # Dockerfile, docker-compose, Kubernetes-Sidecar-Beispiel
 └── .github/workflows/
@@ -807,7 +850,9 @@ func (DEK) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
 ---
 
-## 15. Technologie-Stack
+## 15. Technologie-Stack und Sprachen
+
+### 15.1 Go-Stack des Kerns
 
 | Bereich | Wahl | Begründung |
 |---|---|---|
@@ -826,6 +871,54 @@ func (DEK) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
 Abhängigkeiten werden bewusst klein gehalten. Ein Web-Framework ist unnötig, weil das S3-Routing ohnehin eigene Logik braucht.
 
+### 15.2 Sprachen und Werkzeuge außerhalb des Go-Kerns
+
+**Grundsatz:** Der produktive Code ist zu 100 % Go. Eine weitere Sprache kommt nur hinzu, wenn mindestens einer dieser Gründe zutrifft:
+
+1. **Das Ökosystem erzwingt sie.** Eine Kompatibilitätsaussage über einen Client lässt sich nur mit diesem Client belegen.
+2. **Unabhängigkeit ist der Zweck.** Eine zweite Implementierung soll nicht dieselben Denkfehler erben wie die erste.
+3. **Eine Spezialsprache löst eine Aufgabe, für die Go nicht gemacht ist,** etwa das erschöpfende Prüfen nebenläufiger Abläufe.
+4. **Ein gemessener Engpass, den Go nicht lösen kann.** Das trifft nicht zu (siehe unten) und wird nur mit Profiling-Daten neu bewertet.
+
+| Zweck | Sprache / Werkzeug | Grund | Ort im Repo | Meilenstein |
+|---|---|---|---|---|
+| boto3-Kompatibilitätstests | Python | 1 | `test/integration/clients/boto3/` | M3 |
+| Modell der Manifest- und Rotationsabläufe | TLA+ (PlusCal), Model Checker TLC | 3 | `spec/tla/` | M3.5 |
+| Unabhängiger Referenz-Decoder, Differential Fuzzing | Python (`cryptography`) | 2 | `ref/python/` | nach M4, optional |
+| Benchmark-Diagramme | Python (matplotlib) | Komfort | `bench/plot/` | M5, optional |
+| Maschinenlesbare Formatbeschreibung | Kaitai Struct | 3 | `docs/format.ksy` | M6, optional |
+
+Makefile, Dockerfile, Compose-Dateien, GitHub Actions und Deployment-Beispiele sind Konfiguration, keine Sprachentscheidung.
+
+**Warum kein Rust oder C im Kern:** Gos AES-GCM nutzt auf amd64 und arm64 handoptimiertes Assembly mit Hardware-Beschleunigung, und der Engpass ist das Netzwerk (12.4). Eine Anbindung über cgo würde das statische Binary, die einfache Cross-Compilation und das `distroless/static`-Image kosten. Sie würde eine FFI-Grenze mit unsicherem Code in den sicherheitskritischsten Teil legen, und die Kryptografie liefe außerhalb des FIPS-140-3-Modus der Go-Standardbibliothek (`GOFIPS140`).
+
+#### Formales Modell (TLA+)
+
+Das Modell beschreibt nur die Koordination, nicht die Kryptografie: Objekte, Manifeste und offene Uploads beim Upstream sowie die Schritte der beteiligten Abläufe. Es entsteht vor der Implementierung von M4, weil die Race Conditions aus 10.8 genau dort liegen.
+
+| Bestandteil | Inhalt |
+|---|---|
+| Zustand | Sichtbare Objektversion des Keys (Manifest-ID oder Single-Part), Menge der Manifeste, offene Uploads, lokaler Fortschritt jedes Prozesses |
+| Prozesse | 2–3 parallele Multipart-Uploads, ein Single-Part-PUT, ein DeleteObject, eine Rotation und ein `gc`-Lauf, alle auf demselben Key |
+| Schritte | Die Upstream-Aufrufe aus 10.6, 10.8 und 11 als einzelne atomare Aktionen |
+| Fehler | Absturz eines Prozesses nach jedem Schritt (lokaler Zustand verloren, Upstream-Zustand bleibt); Abbruch offener Uploads durch die Lifecycle-Regel |
+| Sicherheitseigenschaften | I1 (jedes sichtbare Multipart-Objekt hat sein Manifest), I2 (Rotation überschreibt keine neuere Version) |
+| Lebendigkeit (optional) | Unter Fairness verschwinden verwaiste Manifeste irgendwann |
+
+Drei Regeln machen das Modell glaubwürdig:
+
+- **Das Modell muss den alten Fehler finden.** Neben der korrigierten Spezifikation liegt eine Konfiguration mit den Regeln aus Version 0.1. Der CI-Job erwartet, dass TLC dort ein Gegenbeispiel zu I1 meldet. Findet er keines, ist das Modell zu grob.
+- **Gegenbeispiele werden zu Tests.** Jeder von TLC gefundene Ablauf wird als Integrationstest nachgestellt. Test-Hooks im Go-Code halten Requests an definierten Stellen an, bis ein anderer Request seinen nächsten Schritt ausgeführt hat.
+- **Der Code verweist auf das Modell.** Die Go-Funktionen für Complete, Delete, Rotation und `gc` nennen in Kommentaren die zugehörigen Aktionen des Modells, damit Änderungen an der Reihenfolge im Review auffallen.
+
+Der Umfang liegt bei etwa 150–250 Zeilen PlusCal/TLA+. TLC läuft in GitHub Actions, sobald sich `spec/tla/` oder die Koordinationslogik ändert.
+
+#### Referenz-Decoder und Differential Fuzzing
+
+Ein Decoder in rund 100–150 Zeilen Python, geschrieben ausschließlich nach `FORMAT.md` und ohne Blick in den Go-Code. Er muss alle Known-Answer-Testvektoren bestehen. Ein nächtlicher CI-Job erzeugt anschließend aus dem Fuzzing-Korpus des Go-Decoders und aus zufälligen Mutationen gültiger Segmente Eingaben und gibt sie beiden Decodern. Jede Abweichung, bei der einer akzeptiert und der andere ablehnt oder beide unterschiedlichen Klartext liefern, ist eine Lücke in der Spezifikation oder in einer Implementierung.
+
+**Entscheidung: Python.** Es ist durch die boto3-Tests ohnehin im Repo, und der Nachweis „die Spezifikation ist allein implementierbar“ ist in jeder Sprache gleich viel wert. Rust wäre die bewusste Alternative, wenn das Ziel zusätzlich das Erlernen von Rust ist; das würde dann im README auch so benannt.
+
 ---
 
 ## 16. Qualitätssicherung
@@ -841,7 +934,9 @@ Abhängigkeiten werden bewusst klein gehalten. Ein Web-Framework ist unnötig, w
 | Fuzzing (`go test -fuzz`) | Segment-Decoder, Header-Parser, `aws-chunked`-Parser, SigV4-Header-Parser, Range-Header-Parser, Token-Decoder, Manifest-Decoder |
 | Integration | `testcontainers-go` mit MinIO; AWS CLI, boto3, rclone und `mc` laufen als Container gegen den Proxy |
 | Kompatibilitätsmatrix | Aus Integrationstests generiert, in `docs/COMPATIBILITY.md` veröffentlicht |
-| Nebenläufigkeit | Race-Detector in allen Tests, `goleak` in Handler-Tests, Abbruch-Szenarien (Client trennt mitten im Upload/Download) |
+| Nebenläufigkeit | Race-Detector in allen Tests, `goleak` in Handler-Tests, Abbruch-Szenarien (Client trennt mitten im Upload/Download), nachgestellte TLC-Gegenbeispiele (parallele Uploads auf denselben Key, `gc` gegen Complete, Rotation gegen Überschreiben) |
+| Formales Modell | TLC prüft I1 und I2 auf der korrigierten Spezifikation und muss auf der Konfiguration aus Version 0.1 ein Gegenbeispiel finden |
+| Differential Fuzzing (optional) | Go-Decoder und unabhängiger Python-Decoder auf identischen, mutierten Eingaben |
 
 ### 16.2 Angriffstests
 
@@ -862,8 +957,8 @@ Jeder Test simuliert einen aktiven Anbieter und erwartet einen Fehler statt Klar
 | Trigger | Schritte |
 |---|---|
 | Jeder Push / PR | `golangci-lint`, `go vet`, Unit- und Angriffstests mit `-race`, kurze Fuzz-Läufe (je 30 s), `govulncheck`, Mikro-Benchmarks mit `benchstat`-Vergleich |
-| PR auf `main` | Integrationstests mit MinIO und allen Clients |
-| Nächtlich | Lange Fuzz-Läufe, 10-GiB-Speichertest |
+| PR auf `main` | Integrationstests mit MinIO und allen Clients; TLC-Modellprüfung, wenn `spec/tla/` oder die Koordinationslogik betroffen ist |
+| Nächtlich | Lange Fuzz-Läufe, 10-GiB-Speichertest, Differential Fuzzing gegen den Referenz-Decoder (sobald vorhanden) |
 | Tag | `goreleaser`: Binaries, Container-Image, Checksummen, SBOM |
 
 ---
@@ -965,9 +1060,24 @@ Jeder Meilenstein endet mit einem lauffähigen, getesteten Zustand, einem Git-Ta
 - ListObjectsV2 und ListObjects mit Größenumrechnung, Filter für `.blindbucket/`
 - DeleteObjects, Bucket-Operationen zum Durchreichen
 - Virtual-Hosted-Style
-- Integrationstests mit `testcontainers-go`
+- Integrationstests mit `testcontainers-go`; boto3-Szenarien als Python-Skripte im Client-Container
 
 **Definition of Done:** AWS CLI (`cp`, `ls`, `rm`, `sync`) und boto3 (`put_object`, `get_object` mit Range, `list_objects_v2`) bestehen die automatisierte Suite für Objekte unterhalb der Multipart-Schwelle; `COMPATIBILITY.md` listet Ergebnisse inklusive bekannter Eigenheiten (ETag/MD5 bei rclone).
+
+### M3.5 – Formales Modell der Multipart-Koordination (≈ 2–3 Tage)
+
+**Ziel:** Die Regeln aus 10.8 und 11.2 prüfen, bevor M4 sie in Code umsetzt.
+
+- Einarbeitung in PlusCal, TLA+ und TLC
+- Modell nach 15.2: Uploads, Single-Part-PUT, Delete, Rotation, `gc`, Abstürze, Lifecycle-Abbruch
+- Invarianten I1 und I2, optional Lebendigkeit für das Aufräumen
+- Konfiguration aus Version 0.1 als Negativtest
+- CI-Job für TLC
+- ADR-010 auf Basis der Ergebnisse
+
+**Definition of Done:** TLC findet auf der Konfiguration aus Version 0.1 ein Gegenbeispiel zu I1 und auf der korrigierten Spezifikation keines, in einer Konfiguration mit drei Uploads, einer Rotation und einem `gc`-Lauf bei einer CI-Laufzeit unter zehn Minuten. Jedes Gegenbeispiel ist als Szenario für die Integrationstests in M4 beschrieben.
+
+**Portfolio-Artefakt:** Ein kurzer README-Abschnitt, der das Race im eigenen Entwurf mitsamt dem Gegenbeispiel von TLC zeigt.
 
 ### M4 – Multipart-Upload (≈ 5–7 Tage)
 
@@ -978,19 +1088,28 @@ Jeder Meilenstein endet mit einem lauffähigen, getesteten Zustand, einem Git-Ta
 - Part-Größenregeln (10.5)
 - Manifest inklusive Schreibreihenfolge, Download, Range auf Multipart-Objekten (10.6)
 - Größenarithmetik im Listing mit ETag-Suffix
-- Löschen inklusive Manifest, `blindbucket gc`
+- Löschen inklusive Manifest und `blindbucket gc` nach den geprüften Regeln aus 10.8
+- Integrationstests für die Abläufe aus den TLC-Gegenbeispielen
 - Angriffstests der Multipart- und Token-Kategorie
 
-**Definition of Done:** 5-GiB-Upload per `aws s3 cp` mit parallelen Parts über zwei Proxy-Instanzen hinter einem Round-Robin-Loadbalancer (z. B. Caddy oder nginx in `docker-compose`); Download mit identischem SHA-256; `aws s3 ls` zeigt die korrekte Klartextgröße; Neustart einer Instanz während des Uploads bricht den Upload nicht ab.
+**Definition of Done:** 5-GiB-Upload per `aws s3 cp` mit parallelen Parts über zwei Proxy-Instanzen hinter einem Round-Robin-Loadbalancer (z. B. Caddy oder nginx in `docker-compose`); Download mit identischem SHA-256; `aws s3 ls` zeigt die korrekte Klartextgröße; Neustart einer Instanz während des Uploads bricht den Upload nicht ab; zwei parallele Uploads auf denselben Key und ein gleichzeitiger `gc`-Lauf hinterlassen ein lesbares Objekt.
 
 **Portfolio-Schnitt:** Ab hier ist das Projekt vorzeigbar.
+
+### Nach M4, optional – Referenz-Decoder (≈ ½–1 Tag)
+
+- Python-Decoder ausschließlich nach `FORMAT.md` (15.2)
+- Muss alle Known-Answer-Testvektoren bestehen
+- Nächtliches Differential Fuzzing gegen den Go-Decoder
+
+**Definition of Done:** Beide Decoder stimmen auf allen Testvektoren und auf mindestens 100 000 mutierten Eingaben überein; jede Unklarheit in `FORMAT.md`, die beim Schreiben aufgefallen ist, ist behoben.
 
 ### M5 – Production-Grade (≈ 4–5 Tage)
 
 **Ziel:** Betrieb, Schlüsselverwaltung und belastbare Zahlen.
 
 - `KeyProvider` für Vault Transit und AWS KMS (Keyring-Entschlüsselung beim Start)
-- CopyObject (11.1) und `blindbucket rotate` (11.2)
+- CopyObject (11.1) und `blindbucket rotate` mit bedingten Schreibvorgängen (11.2)
 - Prometheus-Metriken, `slog` mit Redaction, Admin-Endpunkte, pprof hinter Flag
 - Graceful Shutdown
 - `goreleaser`, Distroless-Image, Kubernetes-Sidecar-Beispiel
@@ -1018,9 +1137,12 @@ Jeder Meilenstein endet mit einem lauffähigen, getesteten Zustand, einem Git-Ta
 | M1 Krypto-Kern | 3–4 Tage | 4–5 |
 | M2 Lokaler Proxy | 2–3 Tage | 6–8 |
 | M3 S3-Kompatibilität | 5–7 Tage | 11–15 |
-| M4 Multipart | 5–7 Tage | 16–22 |
-| M5 Production-Grade | 4–5 Tage | 20–27 |
-| Puffer (25 %, vor allem für M3 und M4) | 5–7 Tage | **25–34** |
+| M3.5 Formales Modell | 2–3 Tage | 13–18 |
+| M4 Multipart | 5–7 Tage | 18–25 |
+| M5 Production-Grade | 4–5 Tage | 22–30 |
+| Puffer (25 %, vor allem für M3 und M4) | 6–8 Tage | **28–38** |
+
+Der optionale Referenz-Decoder ist nicht eingerechnet. Möglich ist, dass das Modell M4 verkürzt, weil Nebenläufigkeitsfehler dann nicht erst beim Debuggen verteilter Integrationstests auffallen; eingeplant ist das nicht.
 
 Neben Studium und Werkstudententätigkeit entspricht das mehreren Monaten Kalenderzeit, nicht mehreren Wochen.
 
@@ -1031,10 +1153,12 @@ Neben Studium und Werkstudententätigkeit entspricht das mehreren Monaten Kalend
 Das Portfolio-Ziel ist **M4 plus der Benchmark-Teil aus M5**. Wird die Zeit knapp, wird in dieser Reihenfolge gestrichen:
 
 1. M6 vollständig
-2. Vault- und KMS-Provider aus M5 (Datei-Keyring genügt für die Demo)
-3. CopyObject und Rotation aus M5 (im README als geplant markieren, Design ist in diesem Dokument beschrieben)
-4. rclone und `mc` aus der Kompatibilitätsmatrix (AWS CLI und boto3 bleiben)
-5. Virtual-Hosted-Style aus M3
+2. Referenz-Decoder und Differential Fuzzing
+3. Vault- und KMS-Provider aus M5 (Datei-Keyring genügt für die Demo)
+4. CopyObject und Rotation aus M5 (im README als geplant markieren, Design ist in diesem Dokument beschrieben)
+5. rclone und `mc` aus der Kompatibilitätsmatrix (AWS CLI und boto3 bleiben)
+6. Virtual-Hosted-Style aus M3
+7. Das TLA+-Modell aus M3.5. Die Regeln aus 10.8 gelten weiter, sind dann aber nur durch Argumentation und Integrationstests abgesichert.
 
 **Nie gestrichen werden:** Angriffstests und Fuzzing, Known-Answer-Testvektoren, Threat Model, Formatspezifikation, der 10-GiB-Speichernachweis und die Benchmarks. Genau diese Teile unterscheiden das Projekt von den vielen „AES-Wrapper um S3“-Repos.
 
@@ -1059,7 +1183,7 @@ Das README ist für zwei Lesergruppen gebaut: Recruiter entscheiden in 30 Sekund
 - Quickstart mit `docker compose up`
 - Links zu `FORMAT.md` und den ADRs
 
-**Signale für erfahrene Reviewer:** Ein ADR-Verzeichnis mit echten Abwägungen, eine normative Formatspezifikation mit Testvektoren, ein Threat Model mit ehrlichen Restrisiken, Angriffstests mit sprechenden Namen und ein offenes Issue „Please break this“, das zu Reviews des Formats einlädt.
+**Signale für erfahrene Reviewer:** Ein ADR-Verzeichnis mit echten Abwägungen, eine normative Formatspezifikation mit Testvektoren, ein Threat Model mit ehrlichen Restrisiken, Angriffstests mit sprechenden Namen, ein TLA+-Modell samt dem Gegenbeispiel, das ein Race im eigenen Entwurf aufgedeckt hat, und ein offenes Issue „Please break this“, das zu Reviews des Formats einlädt.
 
 ---
 
@@ -1074,6 +1198,9 @@ Das README ist für zwei Lesergruppen gebaut: Recruiter entscheiden in 30 Sekund
 | Gefilterte Listing-Seiten mit 0 Einträgen bei `IsTruncated=true` | Clients, die dabei aufhören, sehen nicht alle Objekte | Tests; Alternative: Manifeste in separatem Bucket (Konfigurationsoption) |
 | ETag ≠ MD5 des Klartexts | Checksum-Warnungen in Sync-Tools | Dokumentierte Client-Flags in der Matrix |
 | Aufwand von M3 und M4 | Zeitplan rutscht | Puffer, Streichreihenfolge aus Abschnitt 19 |
+| Einarbeitung in TLA+ | M3.5 dauert länger als geplant | PlusCal statt reinem TLA+; Modell auf Koordination beschränken; Aufwand deckeln, im Zweifel Streichposition 7 |
+| Modell und Code laufen auseinander | Das Modell prüft nicht mehr, was implementiert ist | Verweise im Code, Gegenbeispiele als Tests, TLC-Job bei Änderungen an der Koordinationslogik |
+| Konsistenz von `ListMultipartUploads` und bedingte Schreibvorgänge bei R2 und MinIO | Annahmen aus 10.8 und 11.2 gelten nicht | In der Kompatibilitätsmatrix prüfen; Mindestfrist in `gc`; `rotate` ohne bedingte Schreibvorgänge nur mit explizitem Flag |
 | Fehler im kryptografischen Eigenbau | Sicherheitslücke | Etablierte Konstruktion (STREAM), keine eigenen Primitive, Testvektoren, Angriffstests, öffentliche Einladung zum Review |
 
 **Offene Fragen, die per ADR entschieden werden:**
@@ -1096,7 +1223,9 @@ Das README ist für zwei Lesergruppen gebaut: Recruiter entscheiden in 30 Sekund
 | ADR-006 | Zustandslosigkeit per verschlüsseltem Upload-Token | M4 |
 | ADR-007 | Manifest als Sidecar-Objekt mit Manifest-ID in den Metadaten | M4 |
 | ADR-008 | Part-Größen als Vielfache der Chunkgröße | M4 |
-| ADR-009 | Rotation per Copy mit Erhalt der Part-Struktur | M5 |
+| ADR-009 | Rotation per Copy mit Erhalt der Part-Struktur und bedingten Schreibvorgängen | M5 |
+| ADR-010 | Lebenszyklus der Manifeste unter Nebenläufigkeit (R1–R4, geprüft mit TLA+) | M3.5 |
+| ADR-011 | Sprachen und Werkzeuge außerhalb des Go-Kerns | M0 |
 
 Jedes ADR folgt dem Schema Kontext, Entscheidung, betrachtete Alternativen, Konsequenzen.
 
@@ -1119,6 +1248,11 @@ Jedes ADR folgt dem Schema Kontext, Entscheidung, betrachtete Alternativen, Kons
 | SigV4 | AWS Signature Version 4, HMAC-basierte Request-Signatur |
 | `aws-chunked` | Content-Encoding für gestreamte Uploads mit Chunk-Signaturen und optionalem Checksum-Trailer |
 | Fail-closed | Im Zweifel abbrechen statt möglicherweise falsche Daten ausliefern |
+| Invariante | Eigenschaft, die in jedem erreichbaren Systemzustand gelten muss |
+| Lost Update | Ein Schreibvorgang ersetzt unbemerkt einen neueren |
+| TLA+ / PlusCal | Spezifikationssprache für nebenläufige und verteilte Systeme; PlusCal ist eine algorithmenähnliche Notation, die nach TLA+ übersetzt wird |
+| TLC | Model Checker für TLA+; prüft alle erreichbaren Zustände eines endlichen Modells |
+| Differential Fuzzing | Zwei unabhängige Implementierungen erhalten dieselben Eingaben; Abweichungen zeigen Fehler |
 
 ---
 
@@ -1135,3 +1269,8 @@ Jedes ADR folgt dem Schema Kontext, Entscheidung, betrachtete Alternativen, Kons
 - AWS-Dokumentation: *Signature Version 4 signing process*, *Authenticating Requests: Using the Authorization Header*, *Checking object integrity* (S3), *Multipart upload overview*.
 - Go-Dokumentation: `crypto/cipher`, `crypto/hkdf`, `net/http` (`ResponseController`, `ErrAbortHandler`).
 - MinIO `warp` – S3-Benchmark-Werkzeug.
+- L. Lamport: *Specifying Systems*. Addison-Wesley 2002.
+- H. Wayne: *Practical TLA+*. Apress 2018.
+- C. Newcombe et al.: *How Amazon Web Services Uses Formal Methods*. Communications of the ACM 58(4), 2015.
+- AWS-Dokumentation: *Conditional requests* bzw. bedingte Schreibvorgänge in S3.
+- pyca/cryptography – Python-Bibliothek für den Referenz-Decoder.
