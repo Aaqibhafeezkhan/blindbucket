@@ -6,9 +6,11 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 [![CI](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml/badge.svg)](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: M1 done — the crypto core works, the proxy does not exist yet.**
-> `blindbucket keygen`, `encrypt` and `decrypt` are usable today. There is no S3
-> endpoint until M2. See [Roadmap](#roadmap) for exactly what does and does not exist.
+> **Status: M2 done — the gateway runs, for whole objects.**
+> `PutObject`, `GetObject`, `HeadObject` and `DeleteObject` work through a real S3
+> endpoint. Client signatures are not verified yet and range requests are not
+> implemented, so run it on loopback until M3. See [Roadmap](#roadmap) for exactly
+> what does and does not exist.
 
 ---
 
@@ -66,34 +68,53 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 
 ## Try it today
 
-The crypto core is usable on its own, which is the point of shipping it first:
-the format can be reviewed, fuzzed and measured before any HTTP is involved.
-
 ```sh
+docker compose up -d                         # MinIO on :9002, as a stand-in provider
 make build
 
 export BLINDBUCKET_PASSPHRASE='...'          # or --passphrase-file, or you are prompted
-./bin/blindbucket keygen  --out keyring.json --kid 2026-09
+./bin/blindbucket keygen --out keyring.json --kid 2026-09
 
+cp blindbucket.example.yaml blindbucket.yaml
+export UPSTREAM_ACCESS_KEY_ID=minioadmin UPSTREAM_SECRET_ACCESS_KEY=minioadmin
+./bin/blindbucket serve --config blindbucket.yaml
+```
+
+Then point any S3 client at it. Nothing about the client changes except the
+endpoint:
+
+```sh
+curl -T big.tar.zst http://127.0.0.1:9000/blindbucket-dev/big.tar.zst
+curl -o restored.tar.zst http://127.0.0.1:9000/blindbucket-dev/big.tar.zst
+```
+
+`HEAD` reports the plaintext size, while the provider is holding something else
+entirely:
+
+```
+$ curl -sI http://127.0.0.1:9000/blindbucket-dev/big.tar.zst | grep -i content-length
+Content-Length: 3000000
+
+$ mc stat local/blindbucket-dev/big.tar.zst
+Size: 3000768                                # 32 + 3000000 + 16 x 46, exactly
+X-Amz-Meta-Bb-Kid: 2026-09
+X-Amz-Meta-Bb-Dek: SV7GTp0qCaXps-fpNUvKpsAOltVyKIHHscz6Dpmx14_i...
+
+$ mc cat local/blindbucket-dev/big.tar.zst | head -c 16 | xxd
+00000000: 424c 424b 0110 0000 0000 0000 ecd4 7291  BLBK..........r.
+```
+
+Change one bit of the stored object and the download stops at that chunk rather
+than handing over a plausible-looking file.
+
+### Without a server
+
+The crypto core is also usable on its own, which is the point of having shipped it
+first: the format can be reviewed, fuzzed and measured before any HTTP is involved.
+
+```sh
 ./bin/blindbucket encrypt --keyring keyring.json -i big.tar.zst -o big.tar.zst.bb
 ./bin/blindbucket decrypt --keyring keyring.json -i big.tar.zst.bb -o restored.tar.zst
-```
-
-The file starts with a small envelope naming the key that protects it, followed by
-one segment:
-
-```
-$ xxd -l 32 big.tar.zst.bb
-00000000: 4242 4631 0100 0732 3032 362d 3039 f973  BBF1...2026-09.s
-00000010: 24e6 d3e8 09dd 9e12 2848 6988 6498 a47b  $.......(Hi.d..{
-```
-
-Corrupt one bit anywhere and the decryption stops at that chunk, with nothing
-written to the output:
-
-```
-$ ./bin/blindbucket decrypt --keyring keyring.json -i tampered.bb -o out
-blindbucket: stream: integrity failure (chunk) at chunk 457: authentication failed (final=false)
 ```
 
 ## Numbers
@@ -108,6 +129,7 @@ and the caveats are in [bench/](bench/).
 | Allocations per chunk, steady state | **0** |
 | Allocations per 8 MiB stream | 22 encrypting, 26 decrypting — constant, not per chunk |
 | 10 GiB encrypt + decrypt | identical SHA-256, **0.5 MiB peak Go heap** |
+| 5 GiB through the gateway to MinIO | identical SHA-256, **12 MiB resident** while streaming |
 
 The allocation figures are the interesting ones. They do not change with the
 number of chunks, which is the whole of goal G3: memory is a function of how many
@@ -138,8 +160,8 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 |---|---|---|
 | M0 | Repo, CI, format specification, threat model, ADR-001/002/011 | **done** |
 | M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | **done** |
-| M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | next |
-| M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | planned |
+| M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | **done** |
+| M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | next |
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | planned |
 | M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
 | — | Independent Python reference decoder, differential fuzzing | optional |
@@ -167,6 +189,13 @@ make vuln           # govulncheck
 docker compose up -d   # local MinIO on :9002, console on :9091
 ```
 
+The integration tests need a provider and skip without one:
+
+```sh
+docker compose up -d
+BLINDBUCKET_TEST_S3_ENDPOINT=http://localhost:9002 go test ./internal/upstream ./internal/proxy
+```
+
 Production code is Go, without exception. Anything else in this repository has a written
 reason in [ADR-011](docs/adr/ADR-011-languages-outside-the-go-core.md).
 
@@ -183,6 +212,11 @@ boundaries, appended bytes, forged chunk sizes, and multipart segments served un
 wrong part number. A fuzz target additionally requires that anything the decoder accepts
 re-encrypts to the identical bytes, which rules out two ciphertexts decoding to one
 plaintext.
+
+The same applies end to end. Integration tests against a real MinIO rewrite stored objects
+behind the gateway's back — corrupting a chunk, truncating the ciphertext, swapping two
+objects' bodies, forging a wrapped key — and require an error rather than plaintext in
+every case.
 
 If you find a weakness in [docs/FORMAT.md](docs/FORMAT.md), in the reasoning in
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), or an attack the tests miss, please open an

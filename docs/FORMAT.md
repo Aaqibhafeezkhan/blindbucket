@@ -235,7 +235,21 @@ the file form has the ASCII bytes `-fi` (`0x2D 0x66 0x69`). A collision would re
 | `x-amz-meta-bb-v` | format version, decimal ASCII | `1` |
 | `x-amz-meta-bb-kid` | KEK id | 1..64 bytes |
 | `x-amz-meta-bb-dek` | wrapped DEK, unpadded base64url | 80 chars |
+| `x-amz-meta-bb-c` | `log2C`, decimal ASCII | 2 chars |
 | `x-amz-meta-bb-mid` | manifest id, 16 bytes unpadded base64url (multipart only) | 22 chars |
+
+`bb-c` repeats the chunk size that the segment header already carries. The
+duplication is deliberate: `HeadObject` and `ListObjectsV2` convert a ciphertext
+size to a plaintext size (§7.2) without ever reading the body, so without a
+recorded chunk size they would have to assume the reading deployment's configured
+one — and report wrong sizes for any object written under a different setting.
+
+This value is **not** authenticated. It is a hint for operations that never open
+the object. Any operation that does read the body takes the chunk size from the
+segment header, which is authenticated, and MUST reject an object whose recorded
+`bb-c` disagrees with it: they can only differ if the metadata was altered. An
+object with no `bb-c` at all is read with the configured chunk size as a
+fallback.
 
 A proxy MUST strip all `bb-`-prefixed metadata from responses to clients, and MUST
 reject client requests that attempt to set metadata with the `bb-` prefix.

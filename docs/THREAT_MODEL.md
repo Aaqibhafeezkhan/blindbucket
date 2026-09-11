@@ -75,6 +75,11 @@ must reside in the same trust domain as the clients it serves.
 - Access patterns: which objects, which byte ranges, how often.
 - The number of parts of a multipart object.
 - The id of the KEK in use — not the KEK itself.
+- The chunk size the object was written with (`bb-c`). This is a deployment-wide
+  constant rather than a property of the data, and it is recorded so that
+  `HeadObject` and listings can report plaintext sizes without reading objects.
+  It is a hint only: any read that touches the body takes the chunk size from the
+  authenticated segment header and rejects an object whose metadata disagrees.
 
 Content *is* hidden. Metadata is not. For workloads where the object names themselves are
 sensitive, this matters, and M6 lists deterministic name encryption as a stretch goal.

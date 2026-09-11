@@ -75,6 +75,40 @@ jobs:
       # each. Seed corpora under testdata/ are exercised by `go test` regardless.
       - run: make fuzz FUZZTIME=30s
 
+  integration:
+    name: Integration (MinIO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # MinIO is started with an explicit command rather than as a service
+      # container, because it needs one ("server /data") and services cannot
+      # supply it.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9002:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:9002/minio/health/live >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:9002/minio/health/live >/dev/null
+      - name: Create the test bucket
+        run: |
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:latest -c \
+            "mc alias set local http://localhost:9002 minioadmin minioadmin && \
+             mc mb --ignore-existing local/blindbucket-test"
+      - name: Run the integration tests
+        env:
+          BLINDBUCKET_TEST_S3_ENDPOINT: http://localhost:9002
+        run: go test -race -count=1 ./internal/upstream/... ./internal/proxy/...
+      - name: MinIO logs on failure
+        if: failure()
+        run: docker logs minio
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-latest

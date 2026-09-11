@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.0
 	golang.org/x/crypto v0.45.0
 	golang.org/x/term v0.37.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

@@ -8,14 +8,14 @@ rejected options is not a decision, it is a default.
 |---|---|---|---|
 | [001](ADR-001-segment-format.md) | Segment format: STREAM with AES-256-GCM, 64 KiB chunks, authenticated header | Accepted | M0 |
 | [002](ADR-002-key-hierarchy.md) | Key hierarchy: external root key, in-memory KEK ring, one DEK per object | Accepted | M0 |
+| [003](ADR-003-upstream-client.md) | A custom upstream client on `net/http` instead of the SDK's S3 client | Accepted | M2 |
+| [004](ADR-004-fail-closed.md) | Fail-closed by aborting the connection after response headers are sent | Accepted | M2 |
 | [011](ADR-011-languages-outside-the-go-core.md) | Languages and tools outside the Go core | Accepted | M0 |
 
 ## Planned
 
 | Nr. | Title | Milestone |
 |---|---|---|
-| 003 | Custom upstream client on `net/http` instead of the SDK S3 client | M2 |
-| 004 | Fail-closed by connection abort after response headers are sent | M2 |
 | 005 | Checksums: verify locally, do not forward, withhold the final chunk | M3 |
 | 010 | Manifest lifecycle under concurrency (R1–R4, checked with TLA+) | M3.5 |
 | 006 | Statelessness via an encrypted upload token | M4 |
