@@ -22,8 +22,29 @@ const (
 	OpGetObject    Operation = "GetObject"
 	OpHeadObject   Operation = "HeadObject"
 	OpDeleteObject Operation = "DeleteObject"
-	OpUnsupported  Operation = "Unsupported"
+
+	OpListObjectsV2 Operation = "ListObjectsV2"
+	OpListObjects   Operation = "ListObjects"
+	OpDeleteObjects Operation = "DeleteObjects"
+
+	OpListBuckets       Operation = "ListBuckets"
+	OpHeadBucket        Operation = "HeadBucket"
+	OpCreateBucket      Operation = "CreateBucket"
+	OpDeleteBucket      Operation = "DeleteBucket"
+	OpGetBucketLocation Operation = "GetBucketLocation"
+
+	OpUnsupported Operation = "Unsupported"
 )
+
+// IsObject reports whether the operation addresses a single object.
+func (o Operation) IsObject() bool {
+	switch o {
+	case OpPutObject, OpGetObject, OpHeadObject, OpDeleteObject:
+		return true
+	default:
+		return false
+	}
+}
 
 // MaxKeyLength is S3's limit on object key length, in bytes.
 const MaxKeyLength = 1024
@@ -41,22 +62,110 @@ type Request struct {
 	Key    string
 }
 
-// Route classifies an inbound request, or explains why it cannot be served.
+// bucketQueryOps maps a bucket-level sub-resource to its operation. Only these
+// are served; every other sub-resource is refused.
+var bucketQueryOps = map[string]Operation{
+	"location": OpGetBucketLocation,
+	"delete":   OpDeleteObjects,
+}
+
+// listingParams are the query parameters that shape a listing rather than
+// selecting a different operation. They are forwarded to the provider
+// unchanged, so pagination, prefixes and delimiters behave exactly as a client
+// expects.
+var listingParams = map[string]bool{
+	"list-type":             true,
+	"prefix":                true,
+	"delimiter":             true,
+	"max-keys":              true,
+	"marker":                true,
+	"continuation-token":    true,
+	"start-after":           true,
+	"encoding-type":         true,
+	"fetch-owner":           true,
+	"expected-bucket-owner": true,
+}
+
+// Route classifies an inbound request.
 //
-// Only path-style addressing is handled; virtual-hosted style arrives with M3.
-func Route(r *http.Request) (Request, *Error) {
-	bucket, key := splitPath(r.URL.Path)
+// baseDomain enables virtual-hosted-style addressing: with "s3.internal.example"
+// configured, a request to bucket.s3.internal.example addresses that bucket.
+// Leave it empty to accept path-style only.
+func Route(r *http.Request, baseDomain string) (Request, *Error) {
+	bucket, key := splitTarget(r, baseDomain)
 
 	switch {
 	case bucket == "":
-		// A request against the service root: ListBuckets and friends.
-		return Request{Op: OpUnsupported}, ErrNotImplemented.WithMessage(
-			"service-level operations are not implemented in this build")
+		return routeService(r)
 	case key == "":
-		return Request{Op: OpUnsupported, Bucket: bucket}, ErrNotImplemented.WithMessage(
-			"bucket-level operations are not implemented in this build")
+		return routeBucket(r, bucket)
+	default:
+		return routeObject(r, bucket, key)
+	}
+}
+
+// routeService handles requests against the endpoint root.
+func routeService(r *http.Request) (Request, *Error) {
+	if r.Method == http.MethodGet && len(r.URL.Query()) == 0 {
+		return Request{Op: OpListBuckets}, nil
+	}
+	return Request{Op: OpUnsupported}, ErrNotImplemented.WithMessage(
+		"service-level operation %s is not implemented in this build", r.Method)
+}
+
+// routeBucket handles requests against a bucket rather than an object.
+func routeBucket(r *http.Request, bucket string) (Request, *Error) {
+	query := r.URL.Query()
+	req := Request{Bucket: bucket}
+
+	// A query parameter is either a sub-resource selecting a different
+	// operation, or one of the parameters that shape a listing. Anything else
+	// names something this build does not implement, and answering it as a
+	// listing would silently ignore what the client asked for.
+	for name := range query {
+		if op, known := bucketQueryOps[name]; known {
+			switch {
+			case op == OpGetBucketLocation && r.Method == http.MethodGet:
+				req.Op = OpGetBucketLocation
+				return req, nil
+			case op == OpDeleteObjects && r.Method == http.MethodPost:
+				req.Op = OpDeleteObjects
+				return req, nil
+			}
+			continue
+		}
+		if !listingParams[name] {
+			return Request{Bucket: bucket, Op: OpUnsupported}, ErrNotImplemented.WithMessage(
+				"the bucket sub-resource %q is not implemented in this build", name)
+		}
 	}
 
+	switch r.Method {
+	case http.MethodGet:
+		// list-type=2 selects ListObjectsV2; its absence means the older call,
+		// which rclone and some backup tools still use.
+		if query.Get("list-type") == "2" {
+			req.Op = OpListObjectsV2
+		} else {
+			req.Op = OpListObjects
+		}
+		return req, nil
+	case http.MethodHead:
+		req.Op = OpHeadBucket
+		return req, nil
+	case http.MethodPut:
+		req.Op = OpCreateBucket
+		return req, nil
+	case http.MethodDelete:
+		req.Op = OpDeleteBucket
+		return req, nil
+	}
+	return Request{Bucket: bucket, Op: OpUnsupported}, ErrNotImplemented.WithMessage(
+		"method %s is not implemented for buckets", r.Method)
+}
+
+// routeObject handles requests against a single object.
+func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 	if len(key) > MaxKeyLength {
 		return Request{}, ErrInvalidArgument.WithMessage(
 			"object key is %d bytes, the maximum is %d", len(key), MaxKeyLength)
@@ -98,6 +207,38 @@ func objectOperation(method string) Operation {
 	default:
 		return OpUnsupported
 	}
+}
+
+// splitTarget determines the bucket and key a request addresses, handling both
+// addressing styles.
+func splitTarget(r *http.Request, baseDomain string) (bucket, key string) {
+	if b, ok := virtualHostBucket(r.Host, baseDomain); ok {
+		return b, strings.TrimPrefix(r.URL.Path, "/")
+	}
+	return splitPath(r.URL.Path)
+}
+
+// virtualHostBucket extracts the bucket from a virtual-hosted-style authority.
+func virtualHostBucket(host, baseDomain string) (string, bool) {
+	if baseDomain == "" || host == "" {
+		return "", false
+	}
+	// The authority may carry a port; the bucket never does.
+	if idx := strings.LastIndex(host, ":"); idx > 0 && !strings.Contains(host[idx:], "]") {
+		host = host[:idx]
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	base := strings.TrimSuffix(strings.ToLower(baseDomain), ".")
+
+	prefix, ok := strings.CutSuffix(host, "."+base)
+	if !ok || prefix == "" {
+		return "", false
+	}
+	// A dotted prefix would be a sub-domain of the bucket, not a bucket name.
+	if strings.Contains(prefix, ".") {
+		return "", false
+	}
+	return prefix, true
 }
 
 // splitPath separates the bucket from the key in a path-style URL.

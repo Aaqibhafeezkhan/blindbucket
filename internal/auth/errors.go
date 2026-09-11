@@ -24,4 +24,8 @@ var (
 	ErrBucketNotAllowed = errors.New("auth: credential is not allowed for this bucket")
 	// ErrUnsupportedPayload reports a payload mode this build cannot verify.
 	ErrUnsupportedPayload = errors.New("auth: unsupported payload signing mode")
+	// ErrMissingContentLength reports a body whose length is unknown. Without
+	// one there is no upstream Content-Length to compute, and discovering it
+	// would mean buffering the body -- the one thing this proxy will not do.
+	ErrMissingContentLength = errors.New("auth: request body has no length")
 )

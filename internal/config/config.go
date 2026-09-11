@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,8 +18,22 @@ import (
 type Config struct {
 	Server   Server   `yaml:"server"`
 	Upstream Upstream `yaml:"upstream"`
+	Clients  []Client `yaml:"clients"`
 	Keys     Keys     `yaml:"keys"`
 	Crypto   Crypto   `yaml:"crypto"`
+}
+
+// Client is one credential the proxy accepts from its own clients.
+//
+// These are unrelated to the upstream credentials, which a client never sees.
+// That separation is what stops a client bypassing the gateway to read
+// ciphertext directly, or to write plaintext.
+type Client struct {
+	Name            string `yaml:"name"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	// Buckets lists the buckets this credential may use. "*" means all.
+	Buckets []string `yaml:"buckets"`
 }
 
 // Server configures the S3 listener.
@@ -28,6 +43,15 @@ type Server struct {
 	// without TLS would undo the point of the gateway.
 	Listen string `yaml:"listen"`
 	TLS    TLS    `yaml:"tls"`
+	// BaseDomain enables virtual-hosted-style addressing: with
+	// "s3.internal.example" set, bucket.s3.internal.example addresses that
+	// bucket. Empty accepts path-style only.
+	BaseDomain string `yaml:"base_domain"`
+	// AllowUnsignedPayload permits UNSIGNED-PAYLOAD from clients. Off by
+	// default: without it the request body is covered by the signature, and
+	// turning it on only makes sense behind TLS or in a sidecar, where the hop
+	// between client and proxy is already trusted.
+	AllowUnsignedPayload bool `yaml:"allow_unsigned_payload"`
 }
 
 // TLS configures transport security towards clients.
@@ -102,6 +126,16 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	for i := range cfg.Clients {
+		for name, field := range map[string]*string{
+			"access_key_id":     &cfg.Clients[i].AccessKeyID,
+			"secret_access_key": &cfg.Clients[i].SecretAccessKey,
+		} {
+			if err := expandEnv("clients["+strconv.Itoa(i)+"]."+name, field); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config: %s: %w", path, err)
@@ -133,10 +167,27 @@ func (c *Config) validate() error {
 		return fmt.Errorf("upstream.region is required")
 	case c.Upstream.AccessKeyID == "" || c.Upstream.SecretAccessKey == "":
 		return fmt.Errorf("upstream credentials are required")
+	case len(c.Clients) == 0:
+		return fmt.Errorf("at least one entry under clients is required; " +
+			"the proxy does not serve unauthenticated requests")
 	case c.Keys.Provider != "file":
 		return fmt.Errorf("keys.provider %q is not supported in this build (only \"file\")", c.Keys.Provider)
 	case c.Keys.Keyring == "":
 		return fmt.Errorf("keys.keyring is required")
+	}
+	for i, client := range c.Clients {
+		switch {
+		case client.Name == "":
+			return fmt.Errorf("clients[%d] has no name", i)
+		case client.AccessKeyID == "":
+			return fmt.Errorf("client %q has no access_key_id", client.Name)
+		case client.SecretAccessKey == "":
+			return fmt.Errorf("client %q has no secret_access_key", client.Name)
+		case len(client.Buckets) == 0:
+			// An empty list would deny everything silently, which looks like a
+			// broken proxy rather than a configuration mistake.
+			return fmt.Errorf("client %q lists no buckets (use \"*\" for all)", client.Name)
+		}
 	}
 	if err := stream.ValidateLog2ChunkSize(c.Crypto.Log2ChunkSize); err != nil {
 		return fmt.Errorf("crypto.log2_chunk_size: %w", err)

@@ -37,7 +37,7 @@ func TestRouteObjectOperations(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
 			t.Parallel()
-			got, err := Route(request(t, tc.method, tc.target))
+			got, err := Route(request(t, tc.method, tc.target), "")
 			if err != nil {
 				t.Fatalf("Route returned %v", err)
 			}
@@ -66,7 +66,7 @@ func TestRouteRefusesSubResources(t *testing.T) {
 	for _, target := range targets {
 		t.Run(target, func(t *testing.T) {
 			t.Parallel()
-			_, err := Route(request(t, http.MethodPut, target))
+			_, err := Route(request(t, http.MethodPut, target), "")
 			if err == nil {
 				t.Fatal("a sub-resource was routed as a plain object request")
 			}
@@ -81,39 +81,153 @@ func TestRouteRefusesReservedPrefix(t *testing.T) {
 	t.Parallel()
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodHead} {
-		_, err := Route(request(t, method, "/bucket/.blindbucket/m/abc/def"))
+		_, err := Route(request(t, method, "/bucket/.blindbucket/m/abc/def"), "")
 		if err == nil || err.Code != "AccessDenied" {
 			t.Errorf("%s on the reserved prefix returned %v, want AccessDenied", method, err)
 		}
 	}
 	// A key that merely starts with a dot is fine.
-	if _, err := Route(request(t, http.MethodGet, "/bucket/.hidden")); err != nil {
+	if _, err := Route(request(t, http.MethodGet, "/bucket/.hidden"), ""); err != nil {
 		t.Errorf("a key starting with a dot was refused: %v", err)
 	}
 }
 
-func TestRouteRejectsBucketAndServiceLevel(t *testing.T) {
+func TestRouteBucketAndServiceLevel(t *testing.T) {
 	t.Parallel()
 
-	for _, target := range []string{"/", "/bucket", "/bucket/"} {
-		_, err := Route(request(t, http.MethodGet, target))
+	tests := []struct {
+		method string
+		target string
+		want   Operation
+		bucket string
+	}{
+		{http.MethodGet, "/", OpListBuckets, ""},
+		{http.MethodGet, "/bucket", OpListObjects, "bucket"},
+		{http.MethodGet, "/bucket/", OpListObjects, "bucket"},
+		{http.MethodGet, "/bucket?list-type=2", OpListObjectsV2, "bucket"},
+		{http.MethodGet, "/bucket?list-type=2&prefix=a/&delimiter=%2F", OpListObjectsV2, "bucket"},
+		{http.MethodHead, "/bucket", OpHeadBucket, "bucket"},
+		{http.MethodPut, "/bucket", OpCreateBucket, "bucket"},
+		{http.MethodDelete, "/bucket", OpDeleteBucket, "bucket"},
+		{http.MethodGet, "/bucket?location", OpGetBucketLocation, "bucket"},
+		{http.MethodPost, "/bucket?delete", OpDeleteObjects, "bucket"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+			t.Parallel()
+			got, err := Route(request(t, tc.method, tc.target), "")
+			if err != nil {
+				t.Fatalf("Route returned %v", err)
+			}
+			if got.Op != tc.want || got.Bucket != tc.bucket {
+				t.Errorf("got {%s %s}, want {%s %s}", got.Op, got.Bucket, tc.want, tc.bucket)
+			}
+		})
+	}
+}
+
+// TestRouteRefusesBucketSubResources keeps ?acl, ?policy and friends from being
+// served as a listing, which would answer a question nobody asked.
+func TestRouteRefusesBucketSubResources(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{
+		"/bucket?acl", "/bucket?policy", "/bucket?versioning", "/bucket?uploads",
+		"/bucket?lifecycle", "/bucket?tagging",
+	} {
+		_, err := Route(request(t, http.MethodGet, target), "")
 		if err == nil || err.Code != "NotImplemented" {
 			t.Errorf("%q returned %v, want NotImplemented", target, err)
 		}
 	}
 }
 
+// TestRouteVirtualHostedStyle covers the addressing form AWS now prefers, where
+// the bucket is a subdomain rather than the first path segment.
+func TestRouteVirtualHostedStyle(t *testing.T) {
+	t.Parallel()
+
+	const base = "s3.internal.example"
+
+	tests := []struct {
+		host   string
+		target string
+		bucket string
+		key    string
+		op     Operation
+	}{
+		{"backups." + base, "/db.dump", "backups", "db.dump", OpGetObject},
+		{"backups." + base + ":9000", "/db.dump", "backups", "db.dump", OpGetObject},
+		{"BACKUPS." + base, "/db.dump", "backups", "db.dump", OpGetObject},
+		{"backups." + base, "/deep/nested/key", "backups", "deep/nested/key", OpGetObject},
+		{"backups." + base, "/", "backups", "", OpListObjects},
+		// Not the base domain: falls back to path style.
+		{"other.example", "/bucket/key", "bucket", "key", OpGetObject},
+		// The base domain itself addresses the service, not a bucket.
+		{base, "/bucket/key", "bucket", "key", OpGetObject},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.host+tc.target, func(t *testing.T) {
+			t.Parallel()
+			r := request(t, http.MethodGet, tc.target)
+			r.Host = tc.host
+
+			got, err := Route(r, base)
+			if err != nil {
+				t.Fatalf("Route returned %v", err)
+			}
+			if got.Bucket != tc.bucket || got.Key != tc.key || got.Op != tc.op {
+				t.Errorf("got {%s %q %q}, want {%s %q %q}",
+					got.Op, got.Bucket, got.Key, tc.op, tc.bucket, tc.key)
+			}
+		})
+	}
+
+	// Without base_domain configured, a virtual-hosted request is parsed as
+	// path style -- the proxy has no way to know the authority carried a bucket.
+	// Operators who serve vhost-style clients must configure base_domain, and
+	// this test records what happens if they do not.
+	t.Run("falls back to path style without a base domain", func(t *testing.T) {
+		t.Parallel()
+		r := request(t, http.MethodGet, "/key")
+		r.Host = "backups." + base
+		got, err := Route(r, "")
+		if err != nil {
+			t.Fatalf("Route returned %v", err)
+		}
+		if got.Bucket != "key" || got.Op != OpListObjects {
+			t.Errorf("got {%s %q}, want the path-style reading {%s %q}",
+				got.Op, got.Bucket, OpListObjects, "key")
+		}
+	})
+
+	t.Run("a dotted prefix is not a bucket", func(t *testing.T) {
+		t.Parallel()
+		r := request(t, http.MethodGet, "/bucket/key")
+		r.Host = "a.b." + base
+		got, err := Route(r, base)
+		if err != nil {
+			t.Fatalf("Route returned %v", err)
+		}
+		if got.Bucket != "bucket" {
+			t.Errorf("bucket = %q, want the path-style fallback", got.Bucket)
+		}
+	})
+}
+
 func TestRouteRejectsOverlongKey(t *testing.T) {
 	t.Parallel()
 
 	long := strings.Repeat("a", MaxKeyLength+1)
-	_, err := Route(request(t, http.MethodPut, "/bucket/"+long))
+	_, err := Route(request(t, http.MethodPut, "/bucket/"+long), "")
 	if err == nil || err.Code != "InvalidArgument" {
 		t.Errorf("an overlong key returned %v, want InvalidArgument", err)
 	}
 
 	ok := strings.Repeat("a", MaxKeyLength)
-	if _, err := Route(request(t, http.MethodPut, "/bucket/"+ok)); err != nil {
+	if _, err := Route(request(t, http.MethodPut, "/bucket/"+ok), ""); err != nil {
 		t.Errorf("a key at the limit was refused: %v", err)
 	}
 }
@@ -122,7 +236,7 @@ func TestRouteRejectsUnsupportedMethods(t *testing.T) {
 	t.Parallel()
 
 	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodOptions} {
-		_, err := Route(request(t, method, "/bucket/key"))
+		_, err := Route(request(t, method, "/bucket/key"), "")
 		if err == nil || err.Code != "NotImplemented" {
 			t.Errorf("%s returned %v, want NotImplemented", method, err)
 		}

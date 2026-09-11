@@ -5,18 +5,25 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+
+	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
@@ -32,13 +39,59 @@ import (
 const (
 	endpointEnv = "BLINDBUCKET_TEST_S3_ENDPOINT"
 	testBucket  = "blindbucket-test"
+
+	clientAccessKey = "BBTESTACCESSKEY"
+	clientSecretKey = "bb-test-secret-key-not-a-real-one"
 )
+
+// signingTransport signs every request the way a real S3 client does.
+//
+// It uses the AWS SDK's signer rather than this project's own code: the proxy
+// must accept what real clients produce, and a test that signed with the
+// verifier's own helpers would only prove the two agree with each other.
+type signingTransport struct{ base http.RoundTripper }
+
+func (s *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		read, err := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		body = read
+		if len(body) == 0 {
+			// A non-nil Body with ContentLength 0 makes net/http switch to
+			// chunked encoding, which is a different request entirely.
+			req.Body = http.NoBody
+		} else {
+			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		req.ContentLength = int64(len(body))
+	}
+
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
+	req.Header.Set("X-Amz-Content-Sha256", hash)
+
+	signer := v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true })
+	creds := aws.Credentials{AccessKeyID: clientAccessKey, SecretAccessKey: clientSecretKey}
+	if err := signer.SignHTTP(req.Context(), creds, req, hash, "s3", "us-east-1", time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	return s.base.RoundTrip(req)
+}
 
 type harness struct {
 	proxy    *httptest.Server
 	upstream *upstream.Client
 	keyring  *keys.Keyring
 	client   *http.Client
+	// unsigned sends requests without a signature, to check that the gateway
+	// refuses them. It has to be captured before the signing transport is
+	// installed: httptest.Server.Client returns the same client every time, so
+	// asking for it later would hand back the signing one.
+	unsigned *http.Client
 }
 
 func newHarness(t *testing.T) *harness {
@@ -61,8 +114,17 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("Generate: %v", err)
 	}
 
+	verifier, err := auth.NewVerifier(auth.Config{Clients: []auth.Client{{
+		Name: "integration", AccessKeyID: clientAccessKey,
+		SecretAccessKey: clientSecretKey, Buckets: []string{testBucket},
+	}}})
+	if err != nil {
+		t.Fatalf("auth.NewVerifier: %v", err)
+	}
+
 	p, err := New(Config{
-		Upstream: client, Keys: ring, Log2ChunkSize: stream.MinLog2ChunkSize,
+		Upstream: client, Keys: ring, Verifier: verifier,
+		Log2ChunkSize: stream.MinLog2ChunkSize,
 		// Discard: these tests deliberately provoke errors, and the log noise
 		// would drown the failures that matter.
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -73,7 +135,11 @@ func newHarness(t *testing.T) *harness {
 
 	srv := httptest.NewServer(p)
 	t.Cleanup(srv.Close)
-	return &harness{proxy: srv, upstream: client, keyring: ring, client: srv.Client()}
+
+	signing := srv.Client()
+	plain := &http.Client{Transport: signing.Transport}
+	signing.Transport = &signingTransport{base: plain.Transport}
+	return &harness{proxy: srv, upstream: client, keyring: ring, client: signing, unsigned: plain}
 }
 
 func (h *harness) url(key string) string {
@@ -500,57 +566,35 @@ func TestIntegrationDeleteAndMissing(t *testing.T) {
 }
 
 // TestIntegrationRefusesUnsupported checks that nothing this build cannot do is
-// quietly accepted. Ignoring a checksum a client sent would turn a detectable
-// corruption into an undetectable one.
+// quietly accepted.
 func TestIntegrationRefusesUnsupported(t *testing.T) {
 	h := newHarness(t)
 	key := testKey(t, "unsupported.bin")
+	h.store(t, key, bytes.Repeat([]byte{7}, 1000))
 
-	t.Run("client checksums", func(t *testing.T) {
-		resp := h.put(t, key, []byte("payload"), map[string]string{
-			"X-Amz-Checksum-Crc32": "AAAAAA==",
-		})
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("status %d, want 501", resp.StatusCode)
+	t.Run("object sub-resources", func(t *testing.T) {
+		for _, suffix := range []string{"?acl", "?tagging", "?uploads", "?partNumber=1"} {
+			resp, err := h.client.Get(h.url(key) + suffix)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("%s returned %d, want 501", suffix, resp.StatusCode)
+			}
 		}
 	})
 
-	t.Run("content-md5", func(t *testing.T) {
-		resp := h.put(t, key, []byte("payload"), map[string]string{
-			"Content-MD5": "1B2M2Y8AsgTpgAmY7PhCfg==",
-		})
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("status %d, want 501", resp.StatusCode)
-		}
-	})
-
-	t.Run("range requests", func(t *testing.T) {
-		h.store(t, key, bytes.Repeat([]byte{7}, 1000))
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(key), nil)
-		if err != nil {
-			t.Fatalf("building request: %v", err)
-		}
-		req.Header.Set("Range", "bytes=0-99")
-		resp, err := h.client.Do(req)
-		if err != nil {
-			t.Fatalf("GET: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("status %d, want 501", resp.StatusCode)
-		}
-	})
-
-	t.Run("sub-resources", func(t *testing.T) {
-		resp, err := h.client.Get(h.url(key) + "?acl")
-		if err != nil {
-			t.Fatalf("GET: %v", err)
-		}
-		defer func() { _ = resp.Body.Close() }()
-		if resp.StatusCode != http.StatusNotImplemented {
-			t.Errorf("status %d, want 501: ?acl must not be served as a plain GET", resp.StatusCode)
+	t.Run("bucket sub-resources", func(t *testing.T) {
+		for _, suffix := range []string{"?versioning", "?policy", "?lifecycle"} {
+			resp, err := h.client.Get(h.proxy.URL + "/" + testBucket + suffix)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("%s returned %d, want 501", suffix, resp.StatusCode)
+			}
 		}
 	})
 
@@ -564,37 +608,15 @@ func TestIntegrationRefusesUnsupported(t *testing.T) {
 			t.Errorf("status %d, want 403", resp.StatusCode)
 		}
 	})
-}
 
-// TestIntegrationNoLengthNoUpload covers the streaming constraint: without a
-// length there is no upstream Content-Length, and buffering to find out is
-// exactly what this proxy will not do.
-func TestIntegrationChunkedUploadRefused(t *testing.T) {
-	h := newHarness(t)
-	key := testKey(t, "chunked.bin")
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, h.url(key),
-		io.NopCloser(strings.NewReader("payload")))
-	if err != nil {
-		t.Fatalf("building request: %v", err)
-	}
-	req.ContentLength = -1 // forces Transfer-Encoding: chunked
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		t.Fatalf("PUT: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusLengthRequired {
-		t.Errorf("status %d, want 411", resp.StatusCode)
-	}
-	if body := readBody(t, resp); !strings.Contains(body, "MissingContentLength") {
-		t.Errorf("body = %q, want MissingContentLength", body)
-	}
-	if _, err := h.upstream.HeadObject(context.Background(), testBucket, key); !upstream.NotFound(err) {
-		t.Error("a refused upload left an object behind")
-	}
+	t.Run("server-side encryption headers", func(t *testing.T) {
+		resp := h.put(t, testKey(t, "sse.bin"), []byte("payload"),
+			map[string]string{"X-Amz-Server-Side-Encryption": "AES256"})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("status %d, want 501", resp.StatusCode)
+		}
+	})
 }
 
 // TestIntegrationAbortedUploadStoresNothing checks that a client which stops
@@ -626,3 +648,343 @@ func TestIntegrationAbortedUploadStoresNothing(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("client went away") }
+
+// TestIntegrationAuthentication checks that the gateway is closed to anyone
+// without a credential, and scoped for those who have one.
+func TestIntegrationAuthentication(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "auth.bin")
+	h.store(t, key, []byte("payload"))
+
+	unsigned := h.unsigned
+
+	t.Run("unsigned requests are refused", func(t *testing.T) {
+		resp, err := unsigned.Get(h.url(key))
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("a bucket outside the credential's scope is refused", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+			h.proxy.URL+"/some-other-bucket/key", nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+	})
+
+	t.Run("a forged signature is refused", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(key), nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		req.Header.Set("Authorization",
+			"AWS4-HMAC-SHA256 Credential="+clientAccessKey+"/"+time.Now().UTC().Format("20060102")+
+				"/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, "+
+				"Signature="+strings.Repeat("0", 64))
+		req.Header.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+		req.Header.Set("X-Amz-Content-Sha256", strings.Repeat("e", 64))
+
+		resp, err := unsigned.Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+		if body := readBody(t, resp); !strings.Contains(body, "SignatureDoesNotMatch") {
+			t.Errorf("body = %q, want SignatureDoesNotMatch", body)
+		}
+	})
+}
+
+// TestIntegrationRangeRequests covers the mapping from plaintext ranges onto
+// ciphertext chunks, end to end through a real provider.
+func TestIntegrationRangeRequests(t *testing.T) {
+	h := newHarness(t)
+	const chunk = 1 << stream.MinLog2ChunkSize
+
+	key := testKey(t, "ranged.bin")
+	payload := make([]byte, 5*chunk+123)
+	for i := range payload {
+		payload[i] = byte(i*7 + 3)
+	}
+	h.store(t, key, payload)
+	size := int64(len(payload))
+
+	tests := []struct {
+		spec       string
+		start, end int64
+	}{
+		{"bytes=0-0", 0, 0},
+		{"bytes=0-99", 0, 99},
+		{"bytes=100-199", 100, 199},
+		{"bytes=4095-4096", chunk - 1, chunk},   // across a chunk boundary
+		{"bytes=4096-8191", chunk, 2*chunk - 1}, // exactly one chunk
+		{"bytes=8192-", 2 * chunk, size - 1},    // open ended
+		{"bytes=-100", size - 100, size - 1},    // suffix
+		{fmt.Sprintf("bytes=0-%d", size-1), 0, size - 1},
+		{fmt.Sprintf("bytes=%d-%d", size-1, size-1), size - 1, size - 1},
+		{fmt.Sprintf("bytes=1000-%d", size+10_000), 1000, size - 1}, // clamped
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.spec, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(key), nil)
+			if err != nil {
+				t.Fatalf("building request: %v", err)
+			}
+			req.Header.Set("Range", tc.spec)
+
+			resp, err := h.client.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusPartialContent {
+				t.Fatalf("status %d, want 206: %s", resp.StatusCode, readBody(t, resp))
+			}
+			want := fmt.Sprintf("bytes %d-%d/%d", tc.start, tc.end, size)
+			if got := resp.Header.Get("Content-Range"); got != want {
+				t.Errorf("Content-Range = %q, want %q", got, want)
+			}
+
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading: %v", err)
+			}
+			if !bytes.Equal(got, payload[tc.start:tc.end+1]) {
+				t.Errorf("got %d bytes, want %d", len(got), tc.end-tc.start+1)
+			}
+		})
+	}
+
+	t.Run("unsatisfiable ranges", func(t *testing.T) {
+		for _, spec := range []string{
+			fmt.Sprintf("bytes=%d-", size), "bytes=abc-def", "bytes=5-2", "items=0-10",
+		} {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(key), nil)
+			if err != nil {
+				t.Fatalf("building request: %v", err)
+			}
+			req.Header.Set("Range", spec)
+			resp, err := h.client.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusPartialContent || resp.StatusCode == http.StatusOK {
+				t.Errorf("range %q was served with %d", spec, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("a tampered chunk inside a range is detected", func(t *testing.T) {
+		tampered := testKey(t, "range-tampered.bin")
+		h.store(t, tampered, payload)
+		h.rewriteUpstream(t, tampered, func(b []byte) []byte {
+			b[stream.HeaderSize+2*(chunk+stream.TagSize)+11] ^= 0x01
+			return b
+		})
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(tampered), nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", 2*chunk, 2*chunk+50))
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode == http.StatusPartialContent {
+			if _, err := io.ReadAll(resp.Body); err == nil {
+				t.Error("a tampered range was served as plaintext")
+			}
+			return
+		}
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status %d, want 502", resp.StatusCode)
+		}
+	})
+}
+
+// TestIntegrationListing checks that listings report plaintext sizes and hide
+// the gateway's own objects.
+func TestIntegrationListing(t *testing.T) {
+	h := newHarness(t)
+	prefix := fmt.Sprintf("listing-test/%d/", time.Now().UnixNano())
+
+	sizes := map[string]int{"a.bin": 100, "b.bin": 4096, "c.bin": 10000}
+	for name, size := range sizes {
+		h.store(t, prefix+name, bytes.Repeat([]byte{1}, size))
+	}
+
+	// An object under the reserved prefix, written directly, must not appear.
+	hidden := ".blindbucket/m/deadbeef/manifest"
+	if _, err := h.upstream.PutObject(context.Background(), upstream.PutObjectInput{
+		Bucket: testBucket, Key: hidden,
+		Body: strings.NewReader("manifest"), ContentLength: 8,
+	}); err != nil {
+		t.Fatalf("writing the hidden object: %v", err)
+	}
+	t.Cleanup(func() { _ = h.upstream.DeleteObject(context.Background(), testBucket, hidden) })
+
+	for _, listType := range []string{"2", ""} {
+		name, query := "ListObjectsV2", "?list-type=2&prefix="+url.QueryEscape(prefix)
+		if listType == "" {
+			name, query = "ListObjects", "?prefix="+url.QueryEscape(prefix)
+		}
+
+		t.Run(name, func(t *testing.T) {
+			resp, err := h.client.Get(h.proxy.URL + "/" + testBucket + query)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d: %s", resp.StatusCode, readBody(t, resp))
+			}
+
+			var result upstream.ListBucketResult
+			if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+				t.Fatalf("the listing is not valid XML: %v", err)
+			}
+			if len(result.Contents) != len(sizes) {
+				t.Fatalf("listed %d objects, want %d", len(result.Contents), len(sizes))
+			}
+			for _, entry := range result.Contents {
+				base := strings.TrimPrefix(entry.Key, prefix)
+				want, ok := sizes[base]
+				if !ok {
+					t.Errorf("unexpected key %q", entry.Key)
+					continue
+				}
+				if entry.Size != int64(want) {
+					t.Errorf("%s: listed size %d, want the plaintext size %d", base, entry.Size, want)
+				}
+			}
+		})
+	}
+
+	t.Run("the reserved prefix is hidden", func(t *testing.T) {
+		resp, err := h.client.Get(h.proxy.URL + "/" + testBucket + "?list-type=2&prefix=.blindbucket/")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		var result upstream.ListBucketResult
+		if err := xml.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("the listing is not valid XML: %v", err)
+		}
+		if len(result.Contents) != 0 {
+			t.Errorf("the gateway's own objects appeared in a listing: %d entries", len(result.Contents))
+		}
+	})
+}
+
+// TestIntegrationDeleteObjects covers the bulk delete `aws s3 rm --recursive`
+// uses.
+func TestIntegrationDeleteObjects(t *testing.T) {
+	h := newHarness(t)
+	prefix := fmt.Sprintf("bulk-delete/%d/", time.Now().UnixNano())
+
+	keys := []string{prefix + "one", prefix + "two", prefix + "three"}
+	for _, key := range keys {
+		h.store(t, key, []byte("payload"))
+	}
+
+	var body strings.Builder
+	body.WriteString("<Delete>")
+	for _, key := range keys {
+		body.WriteString("<Object><Key>" + key + "</Key></Object>")
+	}
+	body.WriteString("</Delete>")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		h.proxy.URL+"/"+testBucket+"?delete", strings.NewReader(body.String()))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, readBody(t, resp))
+	}
+
+	for _, key := range keys {
+		if _, err := h.upstream.HeadObject(context.Background(), testBucket, key); !upstream.NotFound(err) {
+			t.Errorf("%s survived the bulk delete", key)
+		}
+	}
+
+	t.Run("the reserved prefix is refused", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+			h.proxy.URL+"/"+testBucket+"?delete",
+			strings.NewReader("<Delete><Object><Key>.blindbucket/m/x</Key></Object></Delete>"))
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+	})
+}
+
+func TestIntegrationBucketOperations(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("HeadBucket", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodHead,
+			h.proxy.URL+"/"+testBucket, nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatalf("HEAD: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status %d, want 200", resp.StatusCode)
+		}
+	})
+
+	t.Run("GetBucketLocation", func(t *testing.T) {
+		resp, err := h.client.Get(h.proxy.URL + "/" + testBucket + "?location")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("status %d, want 200", resp.StatusCode)
+		}
+		if body := readBody(t, resp); !strings.Contains(body, "LocationConstraint") {
+			t.Errorf("body = %q, want a LocationConstraint document", body)
+		}
+	})
+}

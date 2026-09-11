@@ -11,6 +11,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/config"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/proxy"
@@ -30,9 +31,9 @@ func runServe(ctx context.Context, args []string) error {
 Runs the S3 gateway. Clients point at this endpoint instead of the storage
 provider; the provider only ever sees ciphertext.
 
-This build serves PutObject, GetObject, HeadObject and DeleteObject, and does
-not yet verify client signatures -- run it on loopback or inside a trusted
-network until M3.
+Clients are authenticated with SigV4 against the credentials in the config file.
+Between client and proxy the body is plaintext, so use TLS or keep the listener
+on loopback.
 
 Flags:
 `)
@@ -80,9 +81,26 @@ Flags:
 		return err
 	}
 
+	clients := make([]auth.Client, 0, len(cfg.Clients))
+	for _, c := range cfg.Clients {
+		clients = append(clients, auth.Client{
+			Name: c.Name, AccessKeyID: c.AccessKeyID,
+			SecretAccessKey: c.SecretAccessKey, Buckets: c.Buckets,
+		})
+	}
+	verifier, err := auth.NewVerifier(auth.Config{
+		Clients:              clients,
+		AllowUnsignedPayload: cfg.Server.AllowUnsignedPayload,
+	})
+	if err != nil {
+		return err
+	}
+
 	handler, err := proxy.New(proxy.Config{
 		Upstream:      client,
 		Keys:          ring,
+		Verifier:      verifier,
+		BaseDomain:    cfg.Server.BaseDomain,
 		Log2ChunkSize: cfg.Crypto.Log2ChunkSize,
 		Logger:        log,
 	})
@@ -112,13 +130,17 @@ Flags:
 		"upstream", cfg.Upstream.Endpoint,
 		"active_kid", ring.ActiveKID(),
 		"log2_chunk_size", cfg.Crypto.Log2ChunkSize,
+		"clients", len(cfg.Clients),
+		"base_domain", cfg.Server.BaseDomain,
 		"tls", cfg.Server.TLS.Enabled(),
 	)
 	if cfg.ExposesPlaintextPublicly() {
 		log.Warn("this listener carries plaintext beyond loopback without TLS; " +
 			"clients and proxy must share a trust boundary")
 	}
-	log.Warn("client signatures are not verified in this build; do not expose this port")
+	if cfg.Server.AllowUnsignedPayload {
+		log.Warn("UNSIGNED-PAYLOAD is enabled; request bodies are not covered by the signature")
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {

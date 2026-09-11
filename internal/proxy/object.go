@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
@@ -17,18 +19,21 @@ import (
 // putObject encrypts the client's body and streams the ciphertext upstream.
 //
 // Nothing is buffered. The exact upstream Content-Length is known before the
-// first byte, because the segment format is deterministic in length.
-func (p *Proxy) putObject(w http.ResponseWriter, r *http.Request, req s3api.Request, log *slog.Logger) *s3api.Error {
+// first byte, because the segment format is deterministic in length, and the
+// client's checksum is settled in the window between the last full chunk and the
+// encrypter's Close.
+func (p *Proxy) putObject(
+	w http.ResponseWriter, r *http.Request, req s3api.Request, authResult *auth.Result, log *slog.Logger,
+) *s3api.Error {
 	if apiErr := rejectUnsupportedUpload(r); apiErr != nil {
 		return apiErr
 	}
 
-	plainLen := r.ContentLength
+	body, plainLen, err := auth.NewBodyReader(r, authResult)
+	if err != nil {
+		return translateBody(err)
+	}
 	if plainLen < 0 {
-		// Without a length there is no Content-Length to give the upstream, and
-		// buffering the body to discover it is exactly what this proxy refuses
-		// to do. Chunked uploads arrive with M3, which decodes aws-chunked and
-		// reads the length from x-amz-decoded-content-length.
 		return s3api.ErrMissingContentLength
 	}
 
@@ -78,10 +83,11 @@ func (p *Proxy) putObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 			encDone <- err
 			return
 		}
-		_, copyErr := io.Copy(ew, r.Body)
+		// A checksum failure surfaces from this copy, before Close. Close writes
+		// the final chunk, so a body that failed verification never becomes a
+		// complete segment and the upstream stores nothing.
+		_, copyErr := io.Copy(ew, body)
 		if copyErr == nil {
-			// Close writes the final chunk. A body that ended early therefore
-			// never becomes a complete segment.
 			copyErr = ew.Close()
 		}
 		_ = pw.CloseWithError(copyErr)
@@ -96,7 +102,7 @@ func (p *Proxy) putObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 		ContentType:        r.Header.Get("Content-Type"),
 		CacheControl:       r.Header.Get("Cache-Control"),
 		ContentDisposition: r.Header.Get("Content-Disposition"),
-		ContentEncoding:    r.Header.Get("Content-Encoding"),
+		ContentEncoding:    passthroughContentEncoding(r),
 		ContentLanguage:    r.Header.Get("Content-Language"),
 		Metadata:           mergeMetadata(clientMeta, meta),
 	})
@@ -107,10 +113,8 @@ func (p *Proxy) putObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 
 	switch {
 	case encErr != nil:
-		// The client stopped sending, or encryption failed. Either way the
-		// upstream never saw a complete body and stored nothing.
-		log.Warn("upload aborted before completion", "err", encErr)
-		return s3api.ErrInvalidRequest.WithMessage("the request body ended before %d bytes were read", plainLen)
+		log.Warn("upload rejected before completion", "err", encErr)
+		return translateBody(encErr)
 	case putErr != nil:
 		log.Warn("upstream rejected the upload", "err", putErr)
 		return translateUpstream(putErr)
@@ -122,22 +126,26 @@ func (p *Proxy) putObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 	if out.VersionID != "" {
 		w.Header().Set("x-amz-version-id", out.VersionID)
 	}
+	// Echo the checksums that were actually verified. The client compares them
+	// against its own, and they describe the plaintext -- unlike anything the
+	// provider could report, which describes ciphertext.
+	echoVerifiedChecksums(w.Header(), r.Header, body.Trailer())
+
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusOK)
 	log.Info("object stored", "plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen, "kid", kid)
 	return nil
 }
 
-// getObject decrypts an object on the way to the client.
+// getObject decrypts an object on the way to the client, whole or by range.
 //
-// The order here is the whole of the fail-closed rule: the data key is
-// unwrapped and the first chunk authenticated *before* a status line is
-// written, so a wrong key, forged metadata or a tampered header produces a
-// proper S3 error rather than a truncated body. See
-// docs/adr/ADR-004-fail-closed.md.
+// The order is the whole of the fail-closed rule: the data key is unwrapped and
+// the first chunk authenticated *before* a status line is written, so a wrong
+// key, forged metadata or a tampered header produces a proper S3 error rather
+// than a truncated body. See docs/adr/ADR-004-fail-closed.md.
 func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Request, log *slog.Logger) *s3api.Error {
-	if r.Header.Get("Range") != "" {
-		return s3api.ErrNotImplemented.WithMessage("range requests are not implemented in this build")
+	if spec := r.Header.Get("Range"); spec != "" {
+		return p.getObjectRange(w, r, req, spec, log)
 	}
 
 	out, err := p.upstream.GetObject(r.Context(), upstream.GetObjectInput{
@@ -160,21 +168,125 @@ func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 	}
 
 	copyResponseHeaders(w.Header(), out.Header)
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.FormatInt(plainLen, 10))
 	w.WriteHeader(http.StatusOK)
 
 	written, copyErr := io.Copy(w, reader)
 	if copyErr != nil {
-		// The status and Content-Length are already on the wire, so there is no
-		// way to report this as an error document: appending one would hand the
-		// client bytes it would read as object content. Aborting the connection
-		// instead means the client sees a short read against the declared
-		// length, which every correct client treats as a failure.
-		log.Error("aborting response after an integrity or transport failure",
-			"written_bytes", written, "expected_bytes", plainLen, "err", copyErr)
-		panic(http.ErrAbortHandler)
+		p.abortResponse(log, written, plainLen, copyErr)
 	}
 	log.Info("object served", "plaintext_bytes", plainLen, "kid", meta.KeyID)
+	return nil
+}
+
+// getObjectRange serves a byte range.
+//
+// It costs a HEAD before the ranged read. The chunk boundaries a range maps onto
+// depend on the object's chunk size and total length, and neither is known until
+// the object has been looked at -- so the alternative would be guessing the
+// chunk size from local configuration and being wrong for any object written
+// under a different one. The read is pinned to the ETag seen by the HEAD, so the
+// two requests cannot straddle an overwrite.
+func (p *Proxy) getObjectRange(
+	w http.ResponseWriter, r *http.Request, req s3api.Request, spec string, log *slog.Logger,
+) *s3api.Error {
+	info, err := p.upstream.HeadObject(r.Context(), req.Bucket, req.Key)
+	if err != nil {
+		return translateUpstream(err)
+	}
+
+	meta, err := parseObjectMeta(info.Metadata, p.log2C)
+	if errors.Is(err, errNotEncrypted) {
+		return errNotEncryptedAPI
+	}
+	if err != nil {
+		return p.integrityError(log, "object metadata", err)
+	}
+
+	plainLen, err := stream.OpenedSize(info.ContentLength, meta.Log2ChunkSize)
+	if err != nil {
+		return p.integrityError(log, "ciphertext size", err)
+	}
+
+	start, end, apiErr := parseRange(spec, plainLen)
+	if apiErr != nil {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", plainLen))
+		return apiErr
+	}
+
+	rng, err := stream.MapRange(start, end, info.ContentLength, meta.Log2ChunkSize)
+	if err != nil {
+		if errors.Is(err, stream.ErrRangeNotSatisfiable) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", plainLen))
+			return s3api.ErrInvalidRange
+		}
+		return p.integrityError(log, "range mapping", err)
+	}
+
+	// One request when the header is adjacent to the range, two when it is not.
+	fetchStart := rng.CipherStart
+	if !rng.NeedsSeparateHeader {
+		fetchStart = 0
+	}
+	out, err := p.upstream.GetObject(r.Context(), upstream.GetObjectInput{
+		Bucket:  req.Bucket,
+		Key:     req.Key,
+		Range:   fmt.Sprintf("bytes=%d-%d", fetchStart, rng.CipherEnd),
+		IfMatch: info.ETag,
+	})
+	if err != nil {
+		return translateUpstream(err)
+	}
+	defer func() { _ = out.Body.Close() }()
+
+	rawHeader := make([]byte, stream.HeaderSize)
+	if rng.NeedsSeparateHeader {
+		header, err := p.upstream.GetObject(r.Context(), upstream.GetObjectInput{
+			Bucket: req.Bucket, Key: req.Key,
+			Range:   fmt.Sprintf("bytes=0-%d", stream.HeaderSize-1),
+			IfMatch: info.ETag,
+		})
+		if err != nil {
+			return translateUpstream(err)
+		}
+		_, readErr := io.ReadFull(header.Body, rawHeader)
+		_ = header.Body.Close()
+		if readErr != nil {
+			return p.integrityError(log, "segment header", readErr)
+		}
+	} else if _, err := io.ReadFull(out.Body, rawHeader); err != nil {
+		return p.integrityError(log, "segment header", err)
+	}
+
+	dek, apiErr := p.unwrapDEK(r, req, meta, log)
+	if apiErr != nil {
+		return apiErr
+	}
+	defer clear(dek)
+
+	reader, err := stream.NewRangeReader(out.Body, rawHeader, dek,
+		stream.SegmentParams{Log2ChunkSize: stream.AnyChunkSize}, rng)
+	if err != nil {
+		return p.integrityError(log, "segment header", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	if err := reader.VerifyFirst(); err != nil {
+		return p.integrityError(log, "first chunk", err)
+	}
+
+	copyResponseHeaders(w.Header(), out.Header)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, plainLen))
+	w.Header().Set("Content-Length", strconv.FormatInt(rng.Length, 10))
+	w.WriteHeader(http.StatusPartialContent)
+
+	written, copyErr := io.Copy(w, reader)
+	if copyErr != nil {
+		p.abortResponse(log, written, rng.Length, copyErr)
+	}
+	log.Info("range served", "start", start, "end", end, "bytes", rng.Length, "kid", meta.KeyID)
 	return nil
 }
 
@@ -195,15 +307,14 @@ func (p *Proxy) headObject(w http.ResponseWriter, r *http.Request, req s3api.Req
 
 	// A HEAD never reads the body, so the chunk size cannot be taken from the
 	// authenticated segment header here. It comes from the object's own
-	// metadata, which is why that is recorded at write time; without it this
-	// would silently report wrong sizes for any object written under a
-	// different configuration.
+	// metadata, which is why that is recorded at write time.
 	plainLen, err := stream.OpenedSize(info.ContentLength, meta.Log2ChunkSize)
 	if err != nil {
 		return p.integrityError(log, "ciphertext size", err)
 	}
 
 	copyResponseHeaders(w.Header(), info.Header)
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.FormatInt(plainLen, 10))
 	w.WriteHeader(http.StatusOK)
 	return nil
@@ -216,6 +327,23 @@ func (p *Proxy) deleteObject(w http.ResponseWriter, r *http.Request, req s3api.R
 	}
 	w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+// unwrapDEK recovers an object's data key, bound to its bucket and key.
+func (p *Proxy) unwrapDEK(r *http.Request, req s3api.Request, meta objectMeta, log *slog.Logger) ([]byte, *s3api.Error) {
+	aad, err := keys.ObjectAAD(meta.KeyID, req.Bucket, req.Key)
+	if err != nil {
+		return nil, s3api.ErrInvalidArgument.WithMessage("%v", err)
+	}
+	dek, err := p.keys.Unwrap(r.Context(), meta.KeyID, meta.WrappedDEK, aad)
+	if err != nil {
+		if errors.Is(err, keys.ErrUnknownKID) {
+			return nil, s3api.ErrIntegrity.WithMessage(
+				"the key %q that protects this object is not in the keyring", meta.KeyID)
+		}
+		return nil, p.integrityError(log, "data key", err)
+	}
+	return dek, nil
 }
 
 // openSegment unwraps the data key and authenticates the first chunk.
@@ -233,17 +361,9 @@ func (p *Proxy) openSegment(
 		return nil, objectMeta{}, p.integrityError(log, "object metadata", err)
 	}
 
-	aad, err := keys.ObjectAAD(meta.KeyID, req.Bucket, req.Key)
-	if err != nil {
-		return nil, objectMeta{}, s3api.ErrInvalidArgument.WithMessage("%v", err)
-	}
-	dek, err := p.keys.Unwrap(r.Context(), meta.KeyID, meta.WrappedDEK, aad)
-	if err != nil {
-		if errors.Is(err, keys.ErrUnknownKID) {
-			return nil, objectMeta{}, s3api.ErrIntegrity.WithMessage(
-				"the key %q that protects this object is not in the keyring", meta.KeyID)
-		}
-		return nil, objectMeta{}, p.integrityError(log, "data key", err)
+	dek, apiErr := p.unwrapDEK(r, req, meta, log)
+	if apiErr != nil {
+		return nil, objectMeta{}, apiErr
 	}
 	defer clear(dek)
 
@@ -272,6 +392,17 @@ func (p *Proxy) openSegment(
 	return reader, meta, nil
 }
 
+// abortResponse drops the connection after the headers have gone out.
+//
+// There is no legal way to report a failure here: appending an error document
+// would hand the client bytes it would read as object content. A short read
+// against the declared Content-Length is unmistakable instead.
+func (p *Proxy) abortResponse(log *slog.Logger, written, expected int64, err error) {
+	log.Error("aborting response after an integrity or transport failure",
+		"written_bytes", written, "expected_bytes", expected, "err", err)
+	panic(http.ErrAbortHandler)
+}
+
 // integrityError logs a failed authentication and renders it for the client.
 //
 // A rise in these is security-relevant: it means either a bug or a provider
@@ -282,30 +413,90 @@ func (p *Proxy) integrityError(log *slog.Logger, kind string, err error) *s3api.
 	return s3api.ErrIntegrity.WithMessage("the stored object failed authentication (%s)", kind)
 }
 
-// rejectUnsupportedUpload refuses request features this build cannot honour.
+// parseRange parses a single HTTP byte range against a known size.
 //
-// Silently ignoring them would be the dangerous option: a client that sends a
-// checksum expects it to be verified, and accepting the upload without checking
-// would turn a detected corruption into an undetected one.
+// S3 serves one range at a time, so a multi-range request is refused rather than
+// silently reduced to its first part.
+func parseRange(spec string, size int64) (start, end int64, apiErr *s3api.Error) {
+	value, ok := strings.CutPrefix(strings.TrimSpace(spec), "bytes=")
+	if !ok {
+		return 0, 0, s3api.ErrInvalidRange.WithMessage("range unit is not bytes")
+	}
+	if strings.Contains(value, ",") {
+		return 0, 0, s3api.ErrNotImplemented.WithMessage("multiple ranges in one request are not supported")
+	}
+
+	first, last, found := strings.Cut(value, "-")
+	if !found {
+		return 0, 0, s3api.ErrInvalidRange.WithMessage("range %q is malformed", spec)
+	}
+	first, last = strings.TrimSpace(first), strings.TrimSpace(last)
+
+	switch {
+	case first == "" && last == "":
+		return 0, 0, s3api.ErrInvalidRange.WithMessage("range %q names no bytes", spec)
+
+	case first == "":
+		// A suffix range: the last n bytes.
+		n, err := strconv.ParseInt(last, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, s3api.ErrInvalidRange.WithMessage("suffix length %q is not a positive number", last)
+		}
+		if n > size {
+			n = size
+		}
+		return size - n, size - 1, nil
+
+	case last == "":
+		start, err := strconv.ParseInt(first, 10, 64)
+		if err != nil || start < 0 {
+			return 0, 0, s3api.ErrInvalidRange.WithMessage("offset %q is not a number", first)
+		}
+		if start >= size {
+			return 0, 0, s3api.ErrInvalidRange
+		}
+		return start, size - 1, nil
+
+	default:
+		start, err1 := strconv.ParseInt(first, 10, 64)
+		end, err2 := strconv.ParseInt(last, 10, 64)
+		if err1 != nil || err2 != nil || start < 0 || end < start {
+			return 0, 0, s3api.ErrInvalidRange.WithMessage("range %q is malformed", spec)
+		}
+		if start >= size {
+			return 0, 0, s3api.ErrInvalidRange
+		}
+		if end >= size {
+			end = size - 1
+		}
+		return start, end, nil
+	}
+}
+
+// passthroughContentEncoding forwards the client's Content-Encoding, minus the
+// aws-chunked marker, which describes the transfer framing rather than the
+// object and must not be recorded against the stored object.
+func passthroughContentEncoding(r *http.Request) string {
+	value := r.Header.Get("Content-Encoding")
+	if value == "" {
+		return ""
+	}
+	var kept []string
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" && !strings.EqualFold(trimmed, "aws-chunked") {
+			kept = append(kept, trimmed)
+		}
+	}
+	return strings.Join(kept, ", ")
+}
+
+// rejectUnsupportedUpload refuses request features this build cannot honour.
 func rejectUnsupportedUpload(r *http.Request) *s3api.Error {
-	if sha := r.Header.Get("X-Amz-Content-Sha256"); strings.HasPrefix(sha, "STREAMING-") {
-		return s3api.ErrNotImplemented.WithMessage(
-			"chunked uploads (%s) are not implemented in this build", sha)
-	}
-	if r.Header.Get("Content-MD5") != "" {
-		return s3api.ErrNotImplemented.WithMessage(
-			"Content-MD5 verification is not implemented in this build")
-	}
 	if r.Header.Get("X-Amz-Copy-Source") != "" {
 		return s3api.ErrNotImplemented.WithMessage("CopyObject is not implemented in this build")
 	}
 	for name := range r.Header {
-		lower := strings.ToLower(name)
-		switch {
-		case strings.HasPrefix(lower, "x-amz-checksum-"), lower == "x-amz-sdk-checksum-algorithm":
-			return s3api.ErrNotImplemented.WithMessage(
-				"client checksums (%s) are not implemented in this build", name)
-		case strings.HasPrefix(lower, "x-amz-server-side-encryption"):
+		if strings.HasPrefix(strings.ToLower(name), "x-amz-server-side-encryption") {
 			return s3api.ErrNotImplemented.WithMessage(
 				"server-side encryption headers are not accepted; this gateway encrypts already")
 		}

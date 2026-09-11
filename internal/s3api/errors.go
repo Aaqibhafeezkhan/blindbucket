@@ -39,6 +39,24 @@ var (
 		http.StatusBadRequest}
 	ErrInvalidRange = &Error{"InvalidRange",
 		"The requested range is not satisfiable.", http.StatusRequestedRangeNotSatisfiable}
+	ErrAuthHeaderMalformed = &Error{"AuthorizationHeaderMalformed",
+		"The authorization header is malformed.", http.StatusBadRequest}
+	ErrInvalidAccessKeyID = &Error{"InvalidAccessKeyId",
+		"The access key id you provided does not exist in our records.", http.StatusForbidden}
+	ErrSignatureDoesNotMatch = &Error{"SignatureDoesNotMatch",
+		"The request signature we calculated does not match the signature you provided.",
+		http.StatusForbidden}
+	ErrRequestTimeTooSkewed = &Error{"RequestTimeTooSkewed",
+		"The difference between the request time and the current time is too large.",
+		http.StatusForbidden}
+	ErrBadDigest = &Error{"BadDigest",
+		"The checksum you specified did not match what we received.", http.StatusBadRequest}
+	ErrContentSHA256Mismatch = &Error{"XAmzContentSHA256Mismatch",
+		"The provided x-amz-content-sha256 header does not match what was computed.",
+		http.StatusBadRequest}
+	ErrIncompleteBody = &Error{"IncompleteBody",
+		"The request body terminated unexpectedly or was not framed correctly.",
+		http.StatusBadRequest}
 	ErrNotImplemented = &Error{"NotImplemented",
 		"A header or operation you provided implies functionality that is not implemented.",
 		http.StatusNotImplemented}

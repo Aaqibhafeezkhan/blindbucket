@@ -27,3 +27,12 @@ keys:
 
 crypto:
   log2_chunk_size: 16                    # 64 KiB
+
+# Credentials the proxy accepts from its own clients. These are unrelated to the
+# upstream credentials above, which a client never sees -- that separation is
+# what stops a client bypassing the gateway.
+clients:
+  - name: local-dev
+    access_key_id: ${BB_ACCESS_KEY_ID}
+    secret_access_key: ${BB_SECRET_ACCESS_KEY}
+    buckets: ["blindbucket-dev"]     # "*" for every bucket

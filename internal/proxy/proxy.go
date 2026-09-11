@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
@@ -33,6 +34,12 @@ var errNotEncryptedAPI = &s3api.Error{
 type Config struct {
 	Upstream *upstream.Client
 	Keys     keys.KeyProvider
+	// Verifier authenticates inbound requests. It is required: a gateway that
+	// can be configured to serve unauthenticated requests will eventually be
+	// deployed that way by accident.
+	Verifier *auth.Verifier
+	// BaseDomain enables virtual-hosted-style addressing.
+	BaseDomain string
 	// Log2ChunkSize is the chunk size new objects are written with, and the
 	// fallback for reading objects whose metadata does not record one.
 	Log2ChunkSize uint8
@@ -42,10 +49,12 @@ type Config struct {
 // Proxy serves the S3 API, encrypting on the way in and decrypting on the way
 // out.
 type Proxy struct {
-	upstream *upstream.Client
-	keys     keys.KeyProvider
-	log2C    uint8
-	log      *slog.Logger
+	upstream   *upstream.Client
+	keys       keys.KeyProvider
+	verifier   *auth.Verifier
+	baseDomain string
+	log2C      uint8
+	log        *slog.Logger
 }
 
 // New validates cfg and builds a Proxy.
@@ -55,6 +64,8 @@ func New(cfg Config) (*Proxy, error) {
 		return nil, errors.New("proxy: an upstream client is required")
 	case cfg.Keys == nil:
 		return nil, errors.New("proxy: a key provider is required")
+	case cfg.Verifier == nil:
+		return nil, errors.New("proxy: a request verifier is required")
 	}
 	log2C := cfg.Log2ChunkSize
 	if log2C == 0 {
@@ -67,16 +78,23 @@ func New(cfg Config) (*Proxy, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Proxy{upstream: cfg.Upstream, keys: cfg.Keys, log2C: log2C, log: logger}, nil
+	return &Proxy{
+		upstream:   cfg.Upstream,
+		keys:       cfg.Keys,
+		verifier:   cfg.Verifier,
+		baseDomain: cfg.BaseDomain,
+		log2C:      log2C,
+		log:        logger,
+	}, nil
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := newRequestID()
 	w.Header().Set("x-amz-request-id", requestID)
 
-	req, apiErr := s3api.Route(r)
+	req, apiErr := s3api.Route(r, p.baseDomain)
 	if apiErr != nil {
-		p.fail(w, r, requestID, req.Bucket, req.Key, apiErr)
+		p.fail(w, r, requestID, req, apiErr)
 		return
 	}
 
@@ -87,63 +105,51 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"key", req.Key,
 	)
 
+	// Authentication comes before anything that touches the provider, so an
+	// unsigned request cannot be used to probe what exists.
+	authResult, authErr := p.verifier.Verify(r, req.Bucket)
+	if authErr != nil {
+		log.Warn("rejecting a request that failed verification", "err", authErr)
+		p.fail(w, r, requestID, req, translateAuth(authErr))
+		return
+	}
+	log = log.With("client", authResult.Client.Name)
+
 	var err *s3api.Error
 	switch req.Op {
 	case s3api.OpPutObject:
-		err = p.putObject(w, r, req, log)
+		err = p.putObject(w, r, req, authResult, log)
 	case s3api.OpGetObject:
 		err = p.getObject(w, r, req, log)
 	case s3api.OpHeadObject:
 		err = p.headObject(w, r, req, log)
 	case s3api.OpDeleteObject:
 		err = p.deleteObject(w, r, req, log)
+	case s3api.OpListObjectsV2, s3api.OpListObjects:
+		err = p.listObjects(w, r, req, log)
+	case s3api.OpDeleteObjects:
+		err = p.deleteObjects(w, r, req, log)
+	case s3api.OpListBuckets, s3api.OpHeadBucket, s3api.OpCreateBucket,
+		s3api.OpDeleteBucket, s3api.OpGetBucketLocation:
+		err = p.passthrough(w, r, req, log)
 	default:
 		err = s3api.ErrNotImplemented
 	}
 	if err != nil {
-		p.fail(w, r, requestID, req.Bucket, req.Key, err)
+		p.fail(w, r, requestID, req, err)
 	}
 }
 
 // fail logs and renders an error response.
-func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, requestID, bucket, key string, apiErr *s3api.Error) {
+func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, requestID string, req s3api.Request, apiErr *s3api.Error) {
 	level := slog.LevelWarn
 	if apiErr.HTTPStatus >= http.StatusInternalServerError {
 		level = slog.LevelError
 	}
 	p.log.Log(r.Context(), level, "request failed",
-		"request_id", requestID, "bucket", bucket, "key", key,
+		"request_id", requestID, "op", string(req.Op), "bucket", req.Bucket, "key", req.Key,
 		"code", apiErr.Code, "status", apiErr.HTTPStatus, "detail", apiErr.Message)
 	s3api.WriteError(w, r, apiErr, requestID)
-}
-
-// translateUpstream turns a provider error into the S3 error a client expects.
-//
-// Provider errors are forwarded rather than flattened: a client that asked for a
-// missing key must see NoSuchKey, not a gateway fault it might retry forever.
-func translateUpstream(err error) *s3api.Error {
-	apiErr, ok := upstream.AsAPIError(err)
-	if !ok {
-		return s3api.ErrInternal.WithMessage("upstream request failed")
-	}
-	switch apiErr.StatusCode {
-	case http.StatusNotFound:
-		if apiErr.Code == "NoSuchBucket" {
-			return s3api.ErrNoSuchBucket
-		}
-		return s3api.ErrNoSuchKey
-	case http.StatusForbidden:
-		return s3api.ErrAccessDenied
-	case http.StatusPreconditionFailed:
-		return &s3api.Error{Code: "PreconditionFailed", Message: apiErr.Message,
-			HTTPStatus: http.StatusPreconditionFailed}
-	default:
-		return &s3api.Error{
-			Code:       "InternalError",
-			Message:    "The upstream storage provider returned " + apiErr.Code + ".",
-			HTTPStatus: http.StatusBadGateway,
-		}
-	}
 }
 
 // newRequestID returns an opaque id echoed to the client and carried in logs.

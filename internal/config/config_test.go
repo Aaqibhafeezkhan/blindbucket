@@ -23,6 +23,11 @@ upstream:
   path_style: true
   access_key_id: AKID
   secret_access_key: SECRET
+clients:
+  - name: test
+    access_key_id: CLIENTKEY
+    secret_access_key: CLIENTSECRET
+    buckets: ["*"]
 keys:
   keyring: keyring.json
 `
@@ -49,12 +54,19 @@ func TestLoadResolvesEnvReferences(t *testing.T) {
 	t.Setenv("TEST_UPSTREAM_KEY", "resolved-key")
 	t.Setenv("TEST_UPSTREAM_SECRET", "resolved-secret")
 
+	t.Setenv("TEST_CLIENT_KEY", "resolved-client-key")
+
 	cfg, err := Load(write(t, `
 upstream:
   endpoint: http://localhost:9002
   region: us-east-1
   access_key_id: ${TEST_UPSTREAM_KEY}
   secret_access_key: ${TEST_UPSTREAM_SECRET}
+clients:
+  - name: test
+    access_key_id: ${TEST_CLIENT_KEY}
+    secret_access_key: literal-secret
+    buckets: ["backups"]
 keys:
   keyring: keyring.json
 `))
@@ -67,6 +79,14 @@ keys:
 	if cfg.Upstream.SecretAccessKey != "resolved-secret" {
 		t.Errorf("secret_access_key = %q, want the resolved value", cfg.Upstream.SecretAccessKey)
 	}
+	// Client credentials are referenced the same way, and a literal value is
+	// left alone.
+	if cfg.Clients[0].AccessKeyID != "resolved-client-key" {
+		t.Errorf("client access_key_id = %q, want the resolved value", cfg.Clients[0].AccessKeyID)
+	}
+	if cfg.Clients[0].SecretAccessKey != "literal-secret" {
+		t.Errorf("client secret_access_key = %q, want it untouched", cfg.Clients[0].SecretAccessKey)
+	}
 }
 
 // TestLoadFailsOnMissingEnvReference matters because the alternative is starting
@@ -78,6 +98,11 @@ upstream:
   region: us-east-1
   access_key_id: ${DEFINITELY_NOT_SET_ANYWHERE}
   secret_access_key: SECRET
+clients:
+  - name: test
+    access_key_id: k
+    secret_access_key: s
+    buckets: ["*"]
 keys:
   keyring: keyring.json
 `))
@@ -99,13 +124,31 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 }
 
 func TestValidation(t *testing.T) {
+	const withClients = `
+clients:
+  - name: test
+    access_key_id: k
+    secret_access_key: s
+    buckets: ["*"]`
+
 	tests := map[string]string{
+		"no clients": `
+upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
+keys: {keyring: k}`,
+		"client without a name": `
+upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
+keys: {keyring: k}
+clients: [{access_key_id: k, secret_access_key: s, buckets: ["*"]}]`,
+		"client without buckets": `
+upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
+keys: {keyring: k}
+clients: [{name: n, access_key_id: k, secret_access_key: s}]`,
 		"no endpoint": `
 upstream: {region: r, access_key_id: a, secret_access_key: b}
 keys: {keyring: k}`,
 		"no region": `
 upstream: {endpoint: "http://x", access_key_id: a, secret_access_key: b}
-keys: {keyring: k}`,
+keys: {keyring: k}` + withClients + `,`,
 		"no credentials": `
 upstream: {endpoint: "http://x", region: r}
 keys: {keyring: k}`,
@@ -114,15 +157,15 @@ upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key:
 keys: {}`,
 		"unsupported key provider": `
 upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
-keys: {provider: vault, keyring: k}`,
+keys: {provider: vault, keyring: k}` + withClients,
 		"chunk size out of range": `
 upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
 keys: {keyring: k}
-crypto: {log2_chunk_size: 30}`,
+crypto: {log2_chunk_size: 30}` + withClients,
 		"half-configured TLS": `
 server: {tls: {cert_file: /tmp/c}}
 upstream: {endpoint: "http://x", region: r, access_key_id: a, secret_access_key: b}
-keys: {keyring: k}`,
+keys: {keyring: k}` + withClients,
 	}
 
 	for name, body := range tests {
