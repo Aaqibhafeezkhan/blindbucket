@@ -4,7 +4,7 @@ What actually works, measured by pointing each client at the gateway and running
 it. Every result below came from a real client against a real MinIO, not from
 reading a specification.
 
-**Measured:** 2026-09-11, against M3.
+**Measured:** 2026-09-11, against M4.
 **Setup:** `docker compose up -d`, `blindbucket serve`, path-style, 64 KiB chunks.
 
 ---
@@ -15,12 +15,12 @@ reading a specification.
 |---|---|---|---|
 | AWS CLI v2 | 2.36.43 | **Works** | none |
 | boto3 | 1.43.92 | **Works** | none |
-| MinIO client (`mc`) | RELEASE.2025-08-13 | **Works** | none |
+| MinIO client (`mc`) | RELEASE.2025-08-13 | **Works** | `allow_unsigned_payload: true` on the proxy, for multipart only |
 | rclone | 1.75.1 | **Works with settings** | `allow_unsigned_payload: true` on the proxy; `--ignore-checksum`; `--size-only` for `check` |
 
-Everything below the multipart threshold. Multipart uploads arrive with M4; until
-then a client that switches to them gets a clean `NotImplemented` and stores
-nothing (see [Known limits](#known-limits)).
+Multipart included since M4: each client was run with a file over its own
+threshold, so the parts, the manifest and the size arithmetic are all exercised by
+the client's own code path rather than by a hand-built request.
 
 ---
 
@@ -42,6 +42,10 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-eas
 | `aws s3api put-object` | works — returns the verified `ChecksumCRC64NVME` |
 | `aws s3api get-object --range` | works |
 | `aws s3api head-object` | works — plaintext size, gateway metadata hidden |
+| `aws s3 cp` of 40 MiB and 5 GiB | works — multipart, 8 MiB parts, identical SHA-256 |
+| `aws s3 ls` of a multipart object | works — plaintext size, 5368709120 for the 5 GiB file |
+| `aws s3 cp` across two proxy instances | works — parts spread over both, no affinity needed |
+| restarting an instance mid-upload | the upload completes; the client retries the part it lost |
 
 The CLI's default checksum is CRC64NVME, which is verified against the plaintext
 at the gateway and echoed back. That the echoed value matches what the CLI
@@ -69,7 +73,13 @@ BLINDBUCKET_ENDPOINT=http://127.0.0.1:9000 BLINDBUCKET_BUCKET=blindbucket-dev \
 | Paginator with `PageSize=3`, `Delimiter="/"` | works |
 | `delete_objects` | works |
 | Missing object | `NoSuchKey` |
-| `create_multipart_upload` | `NotImplemented`, nothing stored |
+| `upload_file` / `download_file` at 30 MiB, 8 MiB parts | works — multipart, identical SHA-256 |
+| `head_object` and `list_objects_v2` on a multipart object | plaintext sizes; the ETag carries the part count |
+| `get_object` with `Range` across a part boundary | works |
+| `abort_multipart_upload` | works — no object appears |
+| A part that is not a multiple of the chunk size | refused with `InvalidRequest`, nothing stored |
+| `list_multipart_uploads` | `NotImplemented` — see [Known limits](#known-limits) |
+| `delete_object` / `list_objects_v2` on `.blindbucket/` | `AccessDenied`; the prefix is invisible in listings |
 
 ## MinIO client (`mc`)
 
@@ -84,11 +94,19 @@ mc alias set bb http://127.0.0.1:9000 <key> <secret> --api S3v4
 | `mc ls bb/bucket/prefix/` | works — plaintext sizes |
 | `mc mirror <dir> bb/bucket/p/` | works, nested |
 | `mc cat bb/bucket/key` | works |
+| `mc cp` of 64 MiB | works with `allow_unsigned_payload`, identical SHA-256 |
 
 `mc` sends `STREAMING-AWS4-HMAC-SHA256-PAYLOAD`: aws-chunked with a signature per
 chunk and **no trailer section at all**. That shape is what found the bug fixed
 in `internal/auth/chunked.go` — the decoder expected a trailer block and rejected
 every `mc` upload until a real client was pointed at it.
+
+Its multipart path is different again: `mc` signs single-part bodies but sends
+`UNSIGNED-PAYLOAD` for the parts of a multipart upload, so a large `mc cp` fails
+with *"unsupported payload signing mode"* unless `allow_unsigned_payload: true` is
+set on the proxy. The same caveat as for rclone applies — enable it only behind TLS
+or on loopback. Below the threshold `mc` still needs nothing, which is why the
+summary row names multipart specifically.
 
 ## rclone
 
@@ -127,7 +145,20 @@ These apply to every client.
 
 | Limit | Detail | Arrives |
 |---|---|---|
-| **Multipart uploads** | `CreateMultipartUpload` returns `NotImplemented`. The AWS CLI switches to multipart above 8 MiB, so `aws s3 cp` of a larger file fails — cleanly, storing nothing. `aws s3api put-object` handles the same file in one request. | M4 |
+| **`ListMultipartUploads`** | Returns `NotImplemented`, and will keep doing so. The upload ids this gateway issues are sealed tokens carrying the data key and the manifest id (ADR-006); neither can be reconstructed from the provider's listing, so the call could only return ids no client is able to use. Clients that abort their own uploads are unaffected — they hold the token already. | — |
+| **`UploadPartCopy`** | Returns `NotImplemented`. It needs the range-preserving copy path that arrives with `CopyObject`. | M5 |
+| **Part sizes** | Every part but the last must be a multiple of the chunk size (FORMAT §7.3). The defaults of every client above satisfy this; a client configured with, say, 5.5 MiB parts is refused at completion with a message naming the fix. | — |
+
+### A note on reverse proxies in front of the gateway
+
+The gateway emits user metadata with lower-case header names on purpose, because
+SDKs surface metadata keys exactly as they arrive and boto3 hands the caller
+`response["Metadata"]["origin"]`. A reverse proxy that re-canonicalises headers
+turns that back into `Origin` and breaks every lookup — Go's own
+`httputil.ReverseProxy` does this, and it is worth checking on whatever sits in
+front of a deployment. nginx passes them through unchanged, which is what the CI
+job uses. The symptom is metadata that round-trips with the wrong casing while
+everything else works.
 | **ETag ≠ MD5 of plaintext** | The ETag is the provider's, so it is the MD5 of the ciphertext. Anything comparing it against a local hash sees a mismatch. Sizes are fine. | by design |
 | **Presigned URLs** | Query-signed requests are refused. | M6 |
 | **Listing sizes use the configured chunk size** | A listing carries no per-object metadata, so the conversion assumes the chunk size this deployment is configured with. Correct for everything this deployment wrote; an object written under a different setting is listed with its raw ciphertext size rather than a wrong plaintext one. Not authenticated in any case — see [THREAT_MODEL.md](THREAT_MODEL.md) section 5.4. | by design |

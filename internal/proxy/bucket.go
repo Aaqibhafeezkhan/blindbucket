@@ -35,13 +35,21 @@ func (p *Proxy) listObjects(w http.ResponseWriter, r *http.Request, req s3api.Re
 		if strings.HasPrefix(entry.Key, s3api.ReservedPrefix) {
 			continue
 		}
-		if plain, err := stream.OpenedSize(entry.Size, p.log2C); err == nil {
+		// A multipart object needs its part count, and the ETag suffix S3 appends
+		// is where a listing can get one -- there is no per-object metadata here
+		// to read a manifest id from. See docs/FORMAT.md section 7.2.
+		segments := int64(1)
+		if count, ok := partCountFromETag(entry.ETag); ok {
+			segments = count
+		}
+		if plain, err := stream.OpenedSizeSegments(entry.Size, p.log2C, segments); err == nil {
 			entry.Size = plain
 		} else {
 			// Not a size this format produces at the configured chunk size: a
 			// foreign object, or one written under a different setting. Its own
 			// size is a better answer than a wrong conversion.
-			log.Debug("listing size left unconverted", "key", entry.Key, "size", entry.Size)
+			log.Debug("listing size left unconverted",
+				"key", entry.Key, "size", entry.Size, "segments", segments)
 		}
 		kept = append(kept, entry)
 	}

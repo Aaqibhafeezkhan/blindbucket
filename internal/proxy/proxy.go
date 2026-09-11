@@ -55,6 +55,11 @@ type Proxy struct {
 	baseDomain string
 	log2C      uint8
 	log        *slog.Logger
+
+	// hook is called at the coordination points named in hooks.go. It exists so
+	// that the integration tests can replay the model's counterexamples, and is
+	// nil everywhere else.
+	hook func(point string, req s3api.Request)
 }
 
 // New validates cfg and builds a Proxy.
@@ -129,6 +134,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = p.listObjects(w, r, req, log)
 	case s3api.OpDeleteObjects:
 		err = p.deleteObjects(w, r, req, log)
+	case s3api.OpCreateMultipartUpload:
+		err = p.createMultipartUpload(w, r, req, log)
+	case s3api.OpUploadPart:
+		err = p.uploadPart(w, r, req, authResult, log)
+	case s3api.OpCompleteMultipartUpload:
+		err = p.completeMultipartUpload(w, r, req, log)
+	case s3api.OpAbortMultipartUpload:
+		err = p.abortMultipartUpload(w, r, req, log)
+	case s3api.OpListParts:
+		err = p.listParts(w, r, req, log)
+	case s3api.OpListMultipartUploads:
+		err = p.listMultipartUploads(w, r, req)
 	case s3api.OpListBuckets, s3api.OpHeadBucket, s3api.OpCreateBucket,
 		s3api.OpDeleteBucket, s3api.OpGetBucketLocation:
 		err = p.passthrough(w, r, req, log)

@@ -45,6 +45,65 @@ func NotFound(err error) bool {
 	return ok && ae.StatusCode == http.StatusNotFound
 }
 
+// NoSuchUpload reports whether err says the multipart upload is gone.
+//
+// It is distinct from a 404 on the object: an upload aborted by the bucket's
+// lifecycle rule, or already completed, answers NoSuchUpload while the object
+// itself may well exist. The proxy needs the distinction to tell a client "your
+// upload expired" rather than "no such object".
+func NoSuchUpload(err error) bool {
+	ae, ok := AsAPIError(err)
+	return ok && ae.Code == "NoSuchUpload"
+}
+
+// PreconditionFailed reports whether err is an upstream 412.
+//
+// A conditional CompleteMultipartUpload answers with this when the object
+// changed under a rotation, which is the mechanism that keeps I2 (CONCEPT.md
+// section 11.2).
+func PreconditionFailed(err error) bool {
+	ae, ok := AsAPIError(err)
+	return ok && ae.StatusCode == http.StatusPreconditionFailed
+}
+
+// errorInBody reports an S3 error delivered inside a 2xx response.
+//
+// CompleteMultipartUpload is the call that does this: assembly can take minutes,
+// so S3 sends 200 OK with the headers, keeps the connection alive with
+// whitespace, and only then writes either the result or an Error document. A
+// caller that trusts the status alone reports a completed upload that failed.
+func errorInBody(resp *http.Response, body []byte) *APIError {
+	parsed, isError := parseErrorXML(body)
+	if !isError {
+		return nil
+	}
+	requestID := parsed.RequestID
+	if requestID == "" {
+		requestID = resp.Header.Get("x-amz-request-id")
+	}
+	// The status was 2xx, so it says nothing about the failure. 500 is what an
+	// error with no status of its own maps onto.
+	return &APIError{
+		StatusCode: http.StatusInternalServerError,
+		Code:       parsed.Code,
+		Message:    parsed.Message,
+		RequestID:  requestID,
+		Resource:   parsed.Resource,
+	}
+}
+
+// parseErrorXML reports whether body is an S3 Error document, and decodes it.
+//
+// A body that does not parse, or parses without a Code, is not an error: on the
+// success path of CompleteMultipartUpload it is the ordinary result document.
+func parseErrorXML(body []byte) (errorXML, bool) {
+	var parsed errorXML
+	if err := xml.Unmarshal(body, &parsed); err != nil || parsed.Code == "" {
+		return errorXML{}, false
+	}
+	return parsed, true
+}
+
 // errorXML is the shape S3 uses for error responses.
 type errorXML struct {
 	XMLName   xml.Name `xml:"Error"`

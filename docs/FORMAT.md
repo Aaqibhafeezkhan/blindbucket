@@ -367,19 +367,120 @@ flag clear and segment index `0`.
 
 ---
 
-## 10. Reserved
+## 10. Multipart manifest (`BBM1`)
 
-The following structures are part of the design but their normative text lands with
-the milestone that implements them. Until then, `CONCEPT.md` is the reference.
+A multipart object is the concatenation of one segment per part. Each segment is
+authenticated on its own, but nothing in the segments states how many there are, so
+a provider could serve an object with parts missing and every remaining tag would
+still verify. The manifest is what binds the parts into one object.
 
-| Structure | Magic | Specified in | Milestone |
-|---|---|---|---|
-| Multipart manifest | `"BBM1"` | `CONCEPT.md` §10.6 | M4 |
-| Upload token | version byte `0x01` | `CONCEPT.md` §10.3 | M4 |
+```
+Manifest = "BBM1" || lp(bucket) || lp(key) || ManifestID(16) || uint16_be(M)
+           || { uint16_be(part number) || uint64_be(plaintext size) } × M
+           || HMAC-SHA256(ManifestKey, all preceding bytes)
+```
+
+`ManifestKey = HKDF-SHA256(ikm=DEK, salt="", info="blindbucket/v1/manifest", L=32)`.
+
+### 10.1 Placement
+
+A manifest is stored as its own object at:
+
+```
+.blindbucket/m/<hex(SHA-256(key))>/<ManifestID>
+```
+
+`ManifestID` is 16 random bytes rendered as 22 characters of unpadded base64url —
+the same spelling as in `x-amz-meta-bb-mid`. The object key is hashed rather than
+embedded so that the manifest's own key stays a fixed width: object keys may be
+1024 bytes, which is the same limit the manifest path is subject to.
+
+A proxy MUST refuse client access to the `.blindbucket/` prefix for every
+operation, and MUST omit it from listings. A client that could delete a manifest
+could make its own object unreadable.
+
+### 10.2 Structural rules
+
+- `M` MUST be at least 1 and at most 10000.
+- Part numbers MUST be in 1..10000 and **strictly ascending**. Gaps are permitted:
+  S3 allows parts 1, 5, 9, and the manifest records what was assembled.
+- Part sizes are plaintext sizes and MUST satisfy §7.3.
+- A decoder MUST reject a manifest with trailing bytes.
+
+### 10.3 Verification
+
+A reader MUST check the HMAC **before** interpreting any length prefix inside the
+manifest, so that parsing never runs on bytes an attacker chose.
+
+It MUST then check the bucket, the key and the manifest id against what it
+expected — the bucket and key of the request, and the id from the object's
+`x-amz-meta-bb-mid` — and MUST NOT take any of them from the manifest itself. A
+manifest that is authentic but describes a different object version MUST be
+rejected.
+
+Because the MAC key is derived from the DEK, and every upload draws a fresh DEK, a
+manifest from an earlier upload of the same key does not verify.
+
+### 10.4 Reading a multipart object
+
+1. Read the object metadata, unwrap the DEK, load the manifest named by `bb-mid`.
+2. Verify it as in §10.3.
+3. Compute each part's ciphertext size with §7.1 and check that the sizes sum to
+   the object's stored size. A mismatch MUST be an error.
+4. Decrypt the segments in order. Each segment MUST carry the multipart flag and a
+   segment index equal to its part number in the manifest.
+
+Step 4 is what catches reordering, and step 3 what catches a dropped part.
+
+A provider that removes `bb-mid` to present a multipart object as a single-part one
+is caught at the first segment header: the multipart flag is set and it is
+authenticated.
+
+### 10.5 Lifecycle
+
+Which manifests may be written and deleted, and in what order, is normative and is
+specified in `CONCEPT.md` §10.8 as rules R1–R4. The rules are model-checked in
+[`spec/tla/`](../spec/tla/) and recorded in
+[ADR-010](adr/ADR-010-manifest-lifecycle-under-concurrency.md). In short: every
+operation that makes a multipart object visible mints a fresh manifest id and
+writes its own manifest before the object becomes visible, and deletes at most the
+manifest id it observed beforehand.
+
+Orphaned manifests are expected rather than exceptional. They contain no plaintext.
 
 ---
 
-## 11. Security notes (informative)
+## 11. Upload token
+
+A proxy MUST NOT return the storage provider's `UploadId` to a client. It returns a
+sealed token carrying the whole state of the upload, so that any instance can serve
+any part of it:
+
+```
+Token = base64url( 0x01 || lp(kid) || Nonce(12)
+                   || AES-256-GCM.Seal(TokenKey[kid], Nonce, Body, AAD) )
+Body  = lp(UpstreamUploadId) || WrappedDEK(60) || ManifestID(16)
+AAD   = "blindbucket/v1/upload-token" || lp(bucket) || lp(key)
+```
+
+`TokenKey[kid] = HKDF-SHA256(ikm=KEK, salt="", info="blindbucket/v1/upload-token", L=32)`.
+
+- The `kid` is outside the sealed part so that a token issued before a KEK rotation
+  can still be opened after it.
+- Bucket and key are authenticated but not stored: a token MUST NOT open against
+  any other object.
+- The base64url encoding MUST be unpadded, and a decoder SHOULD reject non-canonical
+  encodings, so that one token has one spelling.
+- Every failure — forged, truncated, wrong object, unknown or retired `kid` — MUST
+  be reported identically. `NoSuchUpload` is what a client sees.
+
+The DEK MUST NOT be derived from the `UploadId`: that value is chosen by the storage
+provider, and a provider that repeated one would force two uploads to share a key
+and reuse a (key, nonce) pair. See `CONCEPT.md` §10.3.
+
+---
+
+## 12. Security notes (informative)
 
 **Why the nonce construction is safe.** Within a segment, `i` is unique by
 construction. Across segments the subkey differs, because each segment draws a fresh
@@ -405,7 +506,7 @@ the same key is not detectable at the format level. See
 
 ---
 
-## 12. Test vectors
+## 13. Test vectors
 
 Known-answer test vectors live in
 [`testdata/vectors/segment_v1.json`](../testdata/vectors/segment_v1.json) and are a
@@ -438,7 +539,7 @@ A change that was *not* deliberate shows up as a failure of that same test.
 
 ---
 
-## 13. Version history
+## 14. Version history
 
 | Format version | Status | Change |
 |---|---|---|

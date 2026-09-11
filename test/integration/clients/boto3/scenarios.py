@@ -22,12 +22,16 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import tempfile
 import time
 import traceback
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+MIB = 1024 * 1024
 
 ENDPOINT = os.environ.get("BLINDBUCKET_ENDPOINT", "http://127.0.0.1:9000")
 BUCKET = os.environ.get("BLINDBUCKET_BUCKET", "blindbucket-dev")
@@ -217,26 +221,187 @@ def missing_objects_report_nosuchkey():
 
 
 @scenario
-def multipart_is_refused_cleanly():
-    """Above the multipart threshold the upload fails without storing anything.
+def multipart_round_trip():
+    """boto3's own transfer manager, over the multipart threshold.
 
-    Multipart arrives with M4. Until then the important property is that the
-    refusal is clean: an error the client understands, and no partial object.
+    upload_file switches to multipart above the threshold and parallelises the
+    parts, which is the code path a real caller uses. Asserting on plaintext
+    after a download_file is the whole claim of the milestone.
     """
-    key = f"{PREFIX}multipart"
+    key = f"{PREFIX}multipart-roundtrip"
+    payload = os.urandom(20 * 1024 * 1024)
+    config = TransferConfig(multipart_threshold=8 * MIB, multipart_chunksize=8 * MIB,
+                            max_concurrency=4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "payload.bin")
+        restored = os.path.join(tmp, "restored.bin")
+        with open(source, "wb") as fh:
+            fh.write(payload)
+
+        s3.upload_file(source, BUCKET, key, Config=config)
+        s3.download_file(BUCKET, key, restored, Config=config)
+        with open(restored, "rb") as fh:
+            got = fh.read()
+
+    check("multipart round trip is byte-identical", got == payload,
+          f"got {len(got)} bytes, want {len(payload)}")
+    check("sha256 matches",
+          hashlib.sha256(got).hexdigest() == hashlib.sha256(payload).hexdigest())
+
+    head = s3.head_object(Bucket=BUCKET, Key=key)
+    check("head_object reports the plaintext size",
+          head["ContentLength"] == len(payload), str(head["ContentLength"]))
+    check("the ETag carries a part count", "-" in head["ETag"], head["ETag"])
+
+    listed = s3.list_objects_v2(Bucket=BUCKET, Prefix=key)["Contents"][0]
+    check("the listing reports the plaintext size",
+          listed["Size"] == len(payload), str(listed["Size"]))
+
+    # A range that straddles a part boundary is the one the prefix sums have to
+    # get right; inside a part it is the ordinary single-segment mapping.
+    boundary = 8 * MIB
+    for start, end in ((0, 99), (boundary - 10, boundary + 10), (len(payload) - 100, len(payload) - 1)):
+        body = s3.get_object(Bucket=BUCKET, Key=key, Range=f"bytes={start}-{end}")["Body"].read()
+        check(f"range {start}-{end}", body == payload[start:end + 1], f"got {len(body)} bytes")
+
+    s3.delete_object(Bucket=BUCKET, Key=key)
+
+
+@scenario
+def multipart_part_sizes_are_enforced():
+    """A non-final part off the chunk grid is refused, and nothing is stored.
+
+    The rule exists so the plaintext size stays recoverable from a listing
+    (docs/FORMAT.md 7.3). Refusing is what keeps an unrecoverable object from
+    being written at all.
+    """
+    key = f"{PREFIX}multipart-unaligned"
+    upload = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
+    upload_id = upload["UploadId"]
+
+    first = s3.upload_part(Bucket=BUCKET, Key=key, UploadId=upload_id,
+                           PartNumber=1, Body=os.urandom(5 * MIB + 1))
+    second = s3.upload_part(Bucket=BUCKET, Key=key, UploadId=upload_id,
+                            PartNumber=2, Body=b"tail")
     try:
-        s3.create_multipart_upload(Bucket=BUCKET, Key=key)
-        check("multipart refused", False, "CreateMultipartUpload was accepted")
+        s3.complete_multipart_upload(
+            Bucket=BUCKET, Key=key, UploadId=upload_id,
+            MultipartUpload={"Parts": [
+                {"PartNumber": 1, "ETag": first["ETag"]},
+                {"PartNumber": 2, "ETag": second["ETag"]},
+            ]},
+        )
+        check("an unaligned part is refused", False, "the completion succeeded")
     except ClientError as exc:
-        check("multipart refused with NotImplemented",
-              exc.response["Error"]["Code"] == "NotImplemented",
+        check("an unaligned part is refused with InvalidRequest",
+              exc.response["Error"]["Code"] == "InvalidRequest",
               exc.response["Error"]["Code"])
 
     try:
         s3.head_object(Bucket=BUCKET, Key=key)
-        check("a refused multipart stores nothing", False, "the object exists")
+        check("a refused completion stores nothing", False, "the object exists")
     except ClientError:
-        check("a refused multipart stores nothing", True)
+        check("a refused completion stores nothing", True)
+
+
+@scenario
+def multipart_abort_leaves_nothing():
+    """An aborted upload produces no object, and its token stops working."""
+    key = f"{PREFIX}multipart-abort"
+    upload = s3.create_multipart_upload(Bucket=BUCKET, Key=key)
+    upload_id = upload["UploadId"]
+    s3.upload_part(Bucket=BUCKET, Key=key, UploadId=upload_id,
+                   PartNumber=1, Body=os.urandom(5 * MIB))
+    s3.abort_multipart_upload(Bucket=BUCKET, Key=key, UploadId=upload_id)
+
+    try:
+        s3.head_object(Bucket=BUCKET, Key=key)
+        check("an aborted upload stores nothing", False, "the object exists")
+    except ClientError:
+        check("an aborted upload stores nothing", True)
+
+    try:
+        s3.upload_part(Bucket=BUCKET, Key=key, UploadId=upload_id,
+                       PartNumber=2, Body=b"more")
+        check("a spent upload id is refused", False, "the part was accepted")
+    except ClientError as exc:
+        check("a spent upload id is refused",
+              exc.response["Error"]["Code"] in ("NoSuchUpload", "404"),
+              exc.response["Error"]["Code"])
+
+
+@scenario
+def upload_tokens_are_bound_to_their_object():
+    """The upload id is a sealed token, not the provider's own.
+
+    It is bound to the bucket and key it was issued for, so a client that may
+    write one key cannot use its token to write another.
+    """
+    mine = f"{PREFIX}token-mine"
+    other = f"{PREFIX}token-other"
+    upload = s3.create_multipart_upload(Bucket=BUCKET, Key=mine)
+
+    check("the upload id is not the provider's own",
+          len(upload["UploadId"]) > 60, f"{len(upload['UploadId'])} characters")
+
+    try:
+        s3.upload_part(Bucket=BUCKET, Key=other, UploadId=upload["UploadId"],
+                       PartNumber=1, Body=b"payload")
+        check("a token does not work on another key", False, "the part was accepted")
+    except ClientError as exc:
+        check("a token does not work on another key",
+              exc.response["Error"]["Code"] in ("NoSuchUpload", "404"),
+              exc.response["Error"]["Code"])
+
+    s3.abort_multipart_upload(Bucket=BUCKET, Key=mine, UploadId=upload["UploadId"])
+
+
+@scenario
+def the_manifest_prefix_is_unreachable():
+    """A client that could delete a manifest could break its own object."""
+    key = f"{PREFIX}manifest-guard"
+    payload = os.urandom(12 * MIB)
+    config = TransferConfig(multipart_threshold=8 * MIB, multipart_chunksize=8 * MIB)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source = os.path.join(tmp, "payload.bin")
+        with open(source, "wb") as fh:
+            fh.write(payload)
+        s3.upload_file(source, BUCKET, key, Config=config)
+
+    listed = s3.list_objects_v2(Bucket=BUCKET, Prefix=".blindbucket/")
+    check("the manifest prefix is invisible in listings",
+          listed.get("KeyCount", 0) == 0 and not listed.get("Contents"),
+          str(listed.get("KeyCount")))
+
+    try:
+        s3.delete_object(Bucket=BUCKET, Key=".blindbucket/m/whatever/id")
+        check("the manifest prefix refuses deletes", False, "the delete succeeded")
+    except ClientError as exc:
+        check("the manifest prefix refuses deletes",
+              exc.response["Error"]["Code"] == "AccessDenied",
+              exc.response["Error"]["Code"])
+
+    check("the object is still readable",
+          s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == payload)
+    s3.delete_object(Bucket=BUCKET, Key=key)
+
+
+@scenario
+def list_multipart_uploads_is_refused_with_a_reason():
+    """It cannot be implemented, and says so rather than returning unusable ids.
+
+    See docs/adr/ADR-006-upload-token.md: a token carries the data key and the
+    manifest id, and the provider's listing has neither.
+    """
+    try:
+        s3.list_multipart_uploads(Bucket=BUCKET)
+        check("ListMultipartUploads is refused", False, "the call succeeded")
+    except ClientError as exc:
+        check("ListMultipartUploads is refused with NotImplemented",
+              exc.response["Error"]["Code"] == "NotImplemented",
+              exc.response["Error"]["Code"])
 
 
 @scenario

@@ -122,8 +122,9 @@ got around to its cleanup yet, and by then u2 had written a manifest that u1 kno
 about. R3 fixes it by licensing a request to delete exactly one id — the one it observed at
 step 2 — and nothing else.
 
-**M4 integration test:** hold u1 between `CompleteMultipartUpload` and the manifest delete;
-let u2 run HEAD and write its manifest; release u1; complete u2; `GetObject` must succeed.
+**M4 integration test:** `TestIntegrationRaceCleanupAgainstConcurrentUpload`. It holds u1
+between `CompleteMultipartUpload` and the manifest delete, lets u2 run its HEAD and write its
+manifest, releases u1, completes u2, and requires the object to read back as u2's.
 
 ### 2. `gc` against an upload in flight — `MCLegacyGc`
 
@@ -142,9 +143,11 @@ Version 0.1's `gc` listed the manifests, read the current manifest id, and delet
 step 4 — it just was not current *yet*. R4 step 2 closes this by asking
 `ListMultipartUploads` first and skipping the key entirely while an upload is in flight.
 
-**M4 integration test:** hold a `CompleteMultipartUpload` after its manifest write; run
-`blindbucket gc` to completion; release the upload; `GetObject` must succeed. With R4 the
-`gc` run must report the key as skipped.
+**M4 integration test:** `TestIntegrationRaceGcAgainstUploadInFlight`. It holds a
+`CompleteMultipartUpload` after its manifest write, runs a whole `gc` pass with the age guard
+switched off, releases the upload, and requires both that the object reads back and that the
+pass reported the key as skipped — otherwise the open-upload check never fired and the test
+would pass for the wrong reason.
 
 ### 3. R4 with its first two steps swapped — `MCGcOrder`
 
@@ -172,8 +175,10 @@ This is the result that pays for the milestone. The argument for R4 in §10.8 is
 nothing in it announces that the order of steps 1 and 2 is load-bearing, and nobody reading
 the finished Go code would either.
 
-**M4 integration test:** the same hooks as scenario 2, releasing the upload creation between
-`gc`'s first and second upstream call.
+**M4 integration test:** `TestIntegrationRaceGcOrderingIsLoadBearing`. It holds `gc` after its
+listing, runs an entire upload to completion inside that window, and then requires both that
+the new object reads back and that an orphan from before the listing was collected — so a pass
+that did nothing at all cannot be mistaken for a pass that did the right thing.
 
 ### 4. Rotation without a conditional write — `MCUnconditionalRotate`
 
@@ -193,3 +198,22 @@ because of that one header.
 
 This is not a defect to fix — it is the documented price of the flag, and the model is what
 makes the warning in the documentation a measured statement rather than a hedge.
+
+It is the one counterexample with no integration test yet: `blindbucket rotate` arrives with
+M5, and the conditional write it depends on is already in the upstream client
+(`CompleteMultipartUploadInput.IfMatch`).
+
+---
+
+## Where the rules ended up in the code
+
+The hook names in `internal/proxy/hooks.go` and `internal/gc` are the model's action names, so
+a trace and a test can be read side by side.
+
+| Model process | Go |
+|---|---|
+| `Up` — the upload steps | `internal/proxy/multipart.go`, `completeMultipartUpload` |
+| `Del` | `internal/proxy/object.go`, `deleteObject` |
+| `Gc` | `internal/gc/gc.go`, `collectKey` |
+| `Put` | `internal/proxy/object.go`, `putObject` — writes no manifest, by design |
+| `Rot` | M5 |

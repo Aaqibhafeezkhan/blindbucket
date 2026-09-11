@@ -9,6 +9,7 @@ import (
 
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
+	"github.com/LennardGeissler/blindbucket/internal/manifest"
 )
 
 // Metadata keys blindbucket sets on upstream objects, without the
@@ -19,6 +20,9 @@ const (
 	metaKeyID     = "bb-kid"
 	metaDEK       = "bb-dek"
 	metaChunkSize = "bb-c"
+	// metaManifestID names the manifest of a multipart object. Its absence is
+	// what makes an object single-part.
+	metaManifestID = "bb-mid"
 )
 
 // objectMeta is what blindbucket records alongside an object so it can be read
@@ -33,16 +37,25 @@ type objectMeta struct {
 	// checked against the authenticated segment header: a fallback that happens
 	// to differ is a stale configuration, not tampering.
 	HasChunkSize bool
+
+	// ManifestID names the object's manifest. Multipart reports whether it is
+	// set; a single-part object has none.
+	ManifestID manifest.ID
+	Multipart  bool
 }
 
 // headers renders the metadata for an upstream request.
 func (m objectMeta) headers() map[string]string {
-	return map[string]string{
+	out := map[string]string{
 		metaVersion:   strconv.Itoa(m.Version),
 		metaKeyID:     m.KeyID,
 		metaDEK:       keys.EncodeWrapped(m.WrappedDEK),
 		metaChunkSize: strconv.Itoa(int(m.Log2ChunkSize)),
 	}
+	if m.Multipart {
+		out[metaManifestID] = m.ManifestID.String()
+	}
+	return out
 }
 
 // parseObjectMeta reads blindbucket's metadata off an upstream response.
@@ -102,13 +115,26 @@ func parseObjectMeta(md map[string]string, fallbackLog2C uint8) (objectMeta, err
 		return objectMeta{}, err
 	}
 
-	return objectMeta{
+	out := objectMeta{
 		Version:       version,
 		KeyID:         kid,
 		WrappedDEK:    wrapped,
 		Log2ChunkSize: log2C,
 		HasChunkSize:  recorded,
-	}, nil
+	}
+
+	// A multipart object names its manifest here. The id is not authenticated,
+	// but it does not need to be: a wrong one simply fails to load a manifest
+	// that verifies, because the manifest's MAC covers the id itself.
+	if raw := lookup(metaManifestID); raw != "" {
+		id, err := manifest.ParseID(raw)
+		if err != nil {
+			return objectMeta{}, fmt.Errorf("object metadata has an unreadable %s: %w",
+				metaManifestID, err)
+		}
+		out.ManifestID, out.Multipart = id, true
+	}
+	return out, nil
 }
 
 // clientMetadata extracts the user metadata a client sent, and refuses any

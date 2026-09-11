@@ -110,6 +110,25 @@ $ mc cat local/blindbucket-dev/big.tar.zst | head -c 16 | xxd
 Change one bit of the stored object and the download stops at that chunk rather
 than handing over a plausible-looking file.
 
+Anything over 8 MiB goes through multipart, which every S3 client does on its own.
+Each part is its own segment with its own salt, and a signed manifest binds them
+into one object so that a provider cannot serve a short one:
+
+```sh
+aws s3 cp 5GiB.bin s3://blindbucket-dev/     # 640 parts, in parallel
+aws s3 ls s3://blindbucket-dev/5GiB.bin      # 5368709120 — the plaintext size
+```
+
+The gateway keeps no state for any of it: the upload id a client gets back is a
+sealed token carrying the data key and the manifest id, so parts can be spread
+across instances and an instance can restart mid-upload. Orphaned manifests — from
+a crashed upload, or from a plain PUT over a multipart object — are cleaned up out
+of band:
+
+```sh
+./bin/blindbucket gc --config blindbucket.yaml --dry-run s3://blindbucket-dev
+```
+
 ### Without a server
 
 The crypto core is also usable on its own, which is the point of having shipped it
@@ -133,6 +152,7 @@ and the caveats are in [bench/](bench/).
 | Allocations per 8 MiB stream | 22 encrypting, 26 decrypting — constant, not per chunk |
 | 10 GiB encrypt + decrypt | identical SHA-256, **0.5 MiB peak Go heap** |
 | 5 GiB through the gateway to MinIO | identical SHA-256, **12 MiB resident** while streaming |
+| 5 GiB multipart, 640 parts, two instances | identical SHA-256, **56 MiB peak resident** per instance |
 
 ## Clients
 
@@ -142,10 +162,15 @@ specification. Full detail and the exact commands are in
 
 | Client | Status | Needs |
 |---|---|---|
-| AWS CLI v2 | works — `cp`, `ls`, `rm`, `sync`, ranges | nothing |
-| boto3 | works — including paginators and delimiters | nothing |
+| AWS CLI v2 | works — `cp`, `ls`, `rm`, `sync`, ranges, multipart | nothing |
+| boto3 | works — including paginators, delimiters and `upload_file` | nothing |
 | MinIO `mc` | works — `cp`, `ls`, `mirror`, `cat` | nothing |
 | rclone | works | `--ignore-checksum`, and `allow_unsigned_payload` on the proxy |
+
+One call is deliberately not implemented: `ListMultipartUploads` returns 501. The
+upload ids this gateway issues are sealed tokens carrying the data key and the
+manifest id, and neither can be recovered from the provider's own listing — so the
+honest answer is a refusal rather than a list of ids no client could use.
 
 Two of those needed a fix that only a real client could have found: `mc` sends an
 aws-chunked body with no trailer section at all, and rclone attaches an `?x-id=`
@@ -187,14 +212,14 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | **done** |
 | M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | **done** |
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
-| M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
+| M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | optional |
 | M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics, benchmarks | planned |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
-M4 is where the project becomes worth showing: multipart is what "works with real S3
-clients" actually means. M3.5 exists to get the coordination rules right before that code
-exists — see below.
+M4 is the point the project becomes worth showing: multipart is what "works with real S3
+clients" actually means for anything over 8 MiB. M3.5 existed to get its coordination rules
+right before the code did — see below.
 
 ## A race in my own design, and the machine that found it
 

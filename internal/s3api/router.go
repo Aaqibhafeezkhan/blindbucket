@@ -9,6 +9,7 @@ package s3api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +28,13 @@ const (
 	OpListObjects   Operation = "ListObjects"
 	OpDeleteObjects Operation = "DeleteObjects"
 
+	OpCreateMultipartUpload   Operation = "CreateMultipartUpload"
+	OpUploadPart              Operation = "UploadPart"
+	OpCompleteMultipartUpload Operation = "CompleteMultipartUpload"
+	OpAbortMultipartUpload    Operation = "AbortMultipartUpload"
+	OpListParts               Operation = "ListParts"
+	OpListMultipartUploads    Operation = "ListMultipartUploads"
+
 	OpListBuckets       Operation = "ListBuckets"
 	OpHeadBucket        Operation = "HeadBucket"
 	OpCreateBucket      Operation = "CreateBucket"
@@ -39,7 +47,20 @@ const (
 // IsObject reports whether the operation addresses a single object.
 func (o Operation) IsObject() bool {
 	switch o {
-	case OpPutObject, OpGetObject, OpHeadObject, OpDeleteObject:
+	case OpPutObject, OpGetObject, OpHeadObject, OpDeleteObject,
+		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
+		OpAbortMultipartUpload, OpListParts:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsMultipart reports whether the operation is part of a multipart upload.
+func (o Operation) IsMultipart() bool {
+	switch o {
+	case OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
+		OpAbortMultipartUpload, OpListParts, OpListMultipartUploads:
 		return true
 	default:
 		return false
@@ -55,11 +76,21 @@ const MaxKeyLength = 1024
 // unreadable.
 const ReservedPrefix = ".blindbucket/"
 
+// MaxPartNumber is S3's largest part number.
+const MaxPartNumber = 10000
+
 // Request is a classified S3 request.
 type Request struct {
 	Op     Operation
 	Bucket string
 	Key    string
+
+	// UploadID is the opaque upload token a client presents on the multipart
+	// operations. It is not the provider's own UploadId; see
+	// docs/adr/ADR-006-upload-token.md.
+	UploadID string
+	// PartNumber is set for UploadPart, 1..MaxPartNumber.
+	PartNumber int
 }
 
 // bucketQueryOps maps a bucket-level sub-resource to its operation. Only these
@@ -67,6 +98,7 @@ type Request struct {
 var bucketQueryOps = map[string]Operation{
 	"location": OpGetBucketLocation,
 	"delete":   OpDeleteObjects,
+	"uploads":  OpListMultipartUploads,
 }
 
 // ignorableParams are query parameters that carry no meaning for the service.
@@ -143,6 +175,9 @@ func routeBucket(r *http.Request, bucket string) (Request, *Error) {
 			case op == OpDeleteObjects && r.Method == http.MethodPost:
 				req.Op = OpDeleteObjects
 				return req, nil
+			case op == OpListMultipartUploads && r.Method == http.MethodGet:
+				req.Op = OpListMultipartUploads
+				return req, nil
 			}
 			continue
 		}
@@ -179,6 +214,18 @@ func routeBucket(r *http.Request, bucket string) (Request, *Error) {
 		"method %s is not implemented for buckets", r.Method)
 }
 
+// objectQueryParams are the query parameters an object request may carry. A
+// parameter outside this set names a sub-resource this build does not implement,
+// and guessing at it would be worse than refusing: ?acl answered as a PUT would
+// send plaintext to the provider.
+var objectQueryParams = map[string]bool{
+	"uploads":            true,
+	"uploadId":           true,
+	"partNumber":         true,
+	"max-parts":          true,
+	"part-number-marker": true,
+}
+
 // routeObject handles requests against a single object.
 func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 	if len(key) > MaxKeyLength {
@@ -190,17 +237,24 @@ func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 			"the %s prefix is reserved by the gateway", ReservedPrefix)
 	}
 
-	// A query parameter on an object request normally selects a sub-resource --
-	// ?acl, ?tagging, ?uploads, ?partNumber, a presigned URL's X-Amz-* set. None
-	// of those are implemented here, and treating one as a plain object request
-	// would be worse than refusing it: ?uploads answered as a PUT would send
-	// plaintext to the provider.
-	for name := range r.URL.Query() {
-		if ignorableParams[strings.ToLower(name)] {
+	query := r.URL.Query()
+	for name := range query {
+		if ignorableParams[strings.ToLower(name)] || objectQueryParams[name] {
 			continue
 		}
 		return Request{Bucket: bucket, Key: key, Op: OpUnsupported},
 			ErrNotImplemented.WithMessage("the sub-resource %q is not implemented in this build", name)
+	}
+
+	// Presence of the parameter decides, not its value. An empty ?uploadId= must
+	// not fall through to the plain-object path: a PUT carrying ?partNumber=1 and
+	// an empty upload id would then be served as PutObject, storing one part's
+	// bytes as the whole object.
+	_, initiating := query["uploads"]
+	_, hasUploadID := query["uploadId"]
+	_, hasPartNumber := query["partNumber"]
+	if initiating || hasUploadID || hasPartNumber {
+		return routeMultipart(r, bucket, key, initiating, query.Get("uploadId"))
 	}
 
 	op := objectOperation(r.Method)
@@ -209,6 +263,82 @@ func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 			ErrNotImplemented.WithMessage("method %s is not implemented for objects", r.Method)
 	}
 	return Request{Op: op, Bucket: bucket, Key: key}, nil
+}
+
+// routeMultipart classifies the five object-level multipart operations.
+//
+// They are told apart by method and by which of ?uploads and ?uploadId is
+// present, which is the only thing that distinguishes, for instance, a
+// CompleteMultipartUpload from a DeleteObjects -- both are POSTs.
+func routeMultipart(r *http.Request, bucket, key string, initiating bool, uploadID string) (Request, *Error) {
+	req := Request{Bucket: bucket, Key: key, UploadID: uploadID}
+
+	if initiating {
+		if uploadID != "" {
+			return unsupported(req), ErrInvalidRequest.WithMessage(
+				"a request cannot carry both ?uploads and ?uploadId")
+		}
+		if r.Method != http.MethodPost {
+			return unsupported(req), ErrNotImplemented.WithMessage(
+				"method %s is not implemented for ?uploads on an object", r.Method)
+		}
+		req.Op = OpCreateMultipartUpload
+		return req, nil
+	}
+
+	// Every operation below acts on an existing upload, so it needs a usable id.
+	if uploadID == "" {
+		return unsupported(req), ErrInvalidArgument.WithMessage("the request names no upload id")
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		number, apiErr := partNumber(r.URL.Query().Get("partNumber"))
+		if apiErr != nil {
+			return unsupported(req), apiErr
+		}
+		// UploadPartCopy: a part whose bytes come from another object rather
+		// than from the request body. It needs a range-preserving copy path and
+		// lands with CopyObject in M5.
+		if r.Header.Get("X-Amz-Copy-Source") != "" {
+			return unsupported(req), ErrNotImplemented.WithMessage(
+				"UploadPartCopy is not implemented in this build")
+		}
+		req.Op, req.PartNumber = OpUploadPart, number
+		return req, nil
+
+	case http.MethodPost:
+		req.Op = OpCompleteMultipartUpload
+		return req, nil
+
+	case http.MethodDelete:
+		req.Op = OpAbortMultipartUpload
+		return req, nil
+
+	case http.MethodGet, http.MethodHead:
+		req.Op = OpListParts
+		return req, nil
+	}
+	return unsupported(req), ErrNotImplemented.WithMessage(
+		"method %s is not implemented for multipart uploads", r.Method)
+}
+
+// partNumber parses and bounds the ?partNumber parameter.
+func partNumber(raw string) (int, *Error) {
+	if raw == "" {
+		return 0, ErrInvalidArgument.WithMessage("a part upload must name a part number")
+	}
+	number, err := strconv.Atoi(raw)
+	if err != nil || number < 1 || number > MaxPartNumber {
+		return 0, ErrInvalidArgument.WithMessage(
+			"part number %q is not an integer in 1..%d", raw, MaxPartNumber)
+	}
+	return number, nil
+}
+
+func unsupported(req Request) Request {
+	req.Op = OpUnsupported
+	return req
 }
 
 func objectOperation(method string) Operation {

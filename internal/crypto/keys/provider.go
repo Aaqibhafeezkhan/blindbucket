@@ -35,4 +35,13 @@ type KeyProvider interface {
 	// Unwrap reverses Wrap. It fails if aad does not match the value used to
 	// wrap, which is what binds a data key to the object it belongs to.
 	Unwrap(ctx context.Context, kid string, wrapped, aad []byte) ([]byte, error)
+
+	// TokenKey derives the key that seals multipart upload tokens under the KEK
+	// named kid. The caller must not retain or log it.
+	//
+	// It is separate from Wrap because a token is not a data key: it is opened
+	// by an instance that may never have seen the upload being created, and it
+	// is keyed off the KEK so that it can be opened without knowing which object
+	// it belongs to. See CONCEPT.md section 10.3.
+	TokenKey(ctx context.Context, kid string) ([]byte, error)
 }

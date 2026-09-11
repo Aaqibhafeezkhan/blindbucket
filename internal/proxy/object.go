@@ -111,6 +111,16 @@ func (p *Proxy) putObject(
 	_ = pr.Close()
 	encErr := <-encDone
 
+	// An upstream that refuses before reading a byte -- an expired upload, a
+	// missing bucket, a denied request -- makes the encrypter fail too, because
+	// closing the pipe is how it is unblocked. That consequence must not be
+	// reported in place of its cause: the client needs to hear NoSuchUpload, not
+	// IncompleteBody. Any other encrypter error is a real one (a failed checksum,
+	// a client that stopped sending) and still takes precedence.
+	if encErr != nil && putErr != nil && errors.Is(encErr, io.ErrClosedPipe) {
+		encErr = nil
+	}
+
 	switch {
 	case encErr != nil:
 		log.Warn("upload rejected before completion", "err", encErr)
@@ -155,6 +165,14 @@ func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 		return translateUpstream(err)
 	}
 	defer func() { _ = out.Body.Close() }()
+
+	// A multipart object is a concatenation of segments whose boundaries only
+	// the manifest knows, so it takes a different path entirely.
+	if multipart, apiErr := p.isMultipart(out.Metadata, log); apiErr != nil {
+		return apiErr
+	} else if multipart {
+		return p.getMultipartObject(w, r, req, out, log)
+	}
 
 	reader, meta, apiErr := p.openSegment(r, req, out.Metadata, out.Body, log)
 	if apiErr != nil {
@@ -202,6 +220,10 @@ func (p *Proxy) getObjectRange(
 	}
 	if err != nil {
 		return p.integrityError(log, "object metadata", err)
+	}
+
+	if meta.Multipart {
+		return p.getMultipartRange(w, r, req, info, meta, spec, log)
 	}
 
 	plainLen, err := stream.OpenedSize(info.ContentLength, meta.Log2ChunkSize)
@@ -308,7 +330,13 @@ func (p *Proxy) headObject(w http.ResponseWriter, r *http.Request, req s3api.Req
 	// A HEAD never reads the body, so the chunk size cannot be taken from the
 	// authenticated segment header here. It comes from the object's own
 	// metadata, which is why that is recorded at write time.
-	plainLen, err := stream.OpenedSize(info.ContentLength, meta.Log2ChunkSize)
+	//
+	// For a multipart object the part count comes from the ETag suffix, which is
+	// what makes the size recoverable without loading the manifest. Neither
+	// input is authenticated; the size a HEAD reports is a hint, exactly as it
+	// is for single-part objects, and the authenticated one is established when
+	// the object is read. See docs/FORMAT.md section 7.2.
+	plainLen, err := p.plainSize(info.ContentLength, info.ETag, meta)
 	if err != nil {
 		return p.integrityError(log, "ciphertext size", err)
 	}
@@ -320,11 +348,38 @@ func (p *Proxy) headObject(w http.ResponseWriter, r *http.Request, req s3api.Req
 	return nil
 }
 
-// deleteObject removes an object upstream.
-func (p *Proxy) deleteObject(w http.ResponseWriter, r *http.Request, req s3api.Request, _ *slog.Logger) *s3api.Error {
+// deleteObject removes an object and, if it was a multipart one, its manifest.
+//
+// The order is rule R3 from CONCEPT.md section 10.8, and it is the same shape as
+// a completion: observe what is visible, act, and only then delete the manifest
+// that was observed -- never "the manifests of this key", and never one that was
+// not seen beforehand. The model in spec/tla/Multipart.tla covers this path as
+// its Del process.
+func (p *Proxy) deleteObject(
+	w http.ResponseWriter, r *http.Request, req s3api.Request, log *slog.Logger,
+) *s3api.Error {
+	// Step 1: what is visible now. This observation is the only thing step 3 is
+	// allowed to delete.
+	observed, hadManifest := p.observedManifest(r.Context(), req.Bucket, req.Key)
+	p.at(hookDelHead, req)
+
+	// Step 2: the object goes.
 	if err := p.upstream.DeleteObject(r.Context(), req.Bucket, req.Key); err != nil {
 		return translateUpstream(err)
 	}
+	p.at(hookDelRemove, req)
+
+	// Step 3: and only now the manifest of the version that was just removed.
+	// Best effort: a failure leaves an orphan, which holds no plaintext and
+	// which gc collects.
+	if hadManifest {
+		if err := p.deleteManifest(r.Context(), req.Bucket, req.Key, observed); err != nil {
+			log.Warn("could not remove the manifest of the deleted object; gc will collect it",
+				"manifest_id", observed.String(), "err", err)
+		}
+	}
+
+	p.at(hookDelManifest, req)
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

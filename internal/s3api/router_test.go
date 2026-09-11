@@ -55,8 +55,6 @@ func TestRouteRefusesSubResources(t *testing.T) {
 	t.Parallel()
 
 	targets := []string{
-		"/bucket/key?uploads",
-		"/bucket/key?partNumber=1&uploadId=abc",
 		"/bucket/key?acl",
 		"/bucket/key?tagging",
 		"/bucket/key?versionId=null",
@@ -133,7 +131,7 @@ func TestRouteRefusesBucketSubResources(t *testing.T) {
 	t.Parallel()
 
 	for _, target := range []string{
-		"/bucket?acl", "/bucket?policy", "/bucket?versioning", "/bucket?uploads",
+		"/bucket?acl", "/bucket?policy", "/bucket?versioning",
 		"/bucket?lifecycle", "/bucket?tagging",
 	} {
 		_, err := Route(request(t, http.MethodGet, target), "")
@@ -309,5 +307,94 @@ func TestErrorWithMessageKeepsCodeAndStatus(t *testing.T) {
 		t.Errorf("message = %q, want it to name the sub-resource", derived.Message)
 	case ErrNotImplemented.Message == derived.Message:
 		t.Error("WithMessage mutated the shared error value")
+	}
+}
+
+// TestRouteMultipart covers the five object-level multipart operations, which S3
+// tells apart by method and by which of ?uploads and ?uploadId is present. A
+// CompleteMultipartUpload and a DeleteObjects are both POSTs; only the query
+// separates them.
+func TestRouteMultipart(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		method, target string
+		want           Operation
+		uploadID       string
+		part           int
+	}{
+		{http.MethodPost, "/bucket/key?uploads", OpCreateMultipartUpload, "", 0},
+		{http.MethodPut, "/bucket/key?partNumber=1&uploadId=tok", OpUploadPart, "tok", 1},
+		{http.MethodPut, "/bucket/key?partNumber=10000&uploadId=tok", OpUploadPart, "tok", 10000},
+		{http.MethodPost, "/bucket/key?uploadId=tok", OpCompleteMultipartUpload, "tok", 0},
+		{http.MethodDelete, "/bucket/key?uploadId=tok", OpAbortMultipartUpload, "tok", 0},
+		{http.MethodGet, "/bucket/key?uploadId=tok", OpListParts, "tok", 0},
+		{http.MethodGet, "/bucket/key?uploadId=tok&max-parts=100", OpListParts, "tok", 0},
+		{http.MethodGet, "/bucket?uploads", OpListMultipartUploads, "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+			t.Parallel()
+			got, err := Route(request(t, tc.method, tc.target), "")
+			if err != nil {
+				t.Fatalf("Route returned %v", err)
+			}
+			if got.Op != tc.want {
+				t.Errorf("op = %s, want %s", got.Op, tc.want)
+			}
+			if got.UploadID != tc.uploadID {
+				t.Errorf("upload id = %q, want %q", got.UploadID, tc.uploadID)
+			}
+			if got.PartNumber != tc.part {
+				t.Errorf("part number = %d, want %d", got.PartNumber, tc.part)
+			}
+		})
+	}
+}
+
+func TestRouteMultipartRefusesMalformedRequests(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name, method, target string
+		code                 string
+	}{
+		{"no part number", http.MethodPut, "/bucket/key?uploadId=tok", "InvalidArgument"},
+		{"part number zero", http.MethodPut, "/bucket/key?partNumber=0&uploadId=tok", "InvalidArgument"},
+		{"part number too large", http.MethodPut,
+			"/bucket/key?partNumber=10001&uploadId=tok", "InvalidArgument"},
+		{"part number not a number", http.MethodPut,
+			"/bucket/key?partNumber=abc&uploadId=tok", "InvalidArgument"},
+		{"both uploads and uploadId", http.MethodPost,
+			"/bucket/key?uploads&uploadId=tok", "InvalidRequest"},
+		{"uploads with the wrong method", http.MethodPut, "/bucket/key?uploads", "NotImplemented"},
+		{"reserved prefix", http.MethodPost, "/bucket/.blindbucket/m/x?uploads", "AccessDenied"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Route(request(t, tc.method, tc.target), "")
+			if err == nil {
+				t.Fatal("a malformed multipart request was accepted")
+			}
+			if err.Code != tc.code {
+				t.Errorf("code = %q, want %q", err.Code, tc.code)
+			}
+		})
+	}
+}
+
+// UploadPartCopy is a part whose bytes come from another object. It needs the
+// range-preserving copy path that lands with CopyObject in M5, and until then it
+// must be refused rather than treated as an ordinary part upload with an empty
+// body.
+func TestRouteRefusesUploadPartCopy(t *testing.T) {
+	t.Parallel()
+
+	r := request(t, http.MethodPut, "/bucket/key?partNumber=1&uploadId=tok")
+	r.Header.Set("X-Amz-Copy-Source", "/other/source")
+	_, err := Route(r, "")
+	if err == nil || err.Code != "NotImplemented" {
+		t.Fatalf("got %v, want NotImplemented", err)
 	}
 }

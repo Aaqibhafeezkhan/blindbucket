@@ -86,7 +86,10 @@ type harness struct {
 	proxy    *httptest.Server
 	upstream *upstream.Client
 	keyring  *keys.Keyring
-	client   *http.Client
+	// gateway is the Proxy behind the server, so that a test can install the
+	// coordination hooks of hooks.go and replay a model counterexample.
+	gateway *Proxy
+	client  *http.Client
 	// unsigned sends requests without a signature, to check that the gateway
 	// refuses them. It has to be captured before the signing transport is
 	// installed: httptest.Server.Client returns the same client every time, so
@@ -139,7 +142,10 @@ func newHarness(t *testing.T) *harness {
 	signing := srv.Client()
 	plain := &http.Client{Transport: signing.Transport}
 	signing.Transport = &signingTransport{base: plain.Transport}
-	return &harness{proxy: srv, upstream: client, keyring: ring, client: signing, unsigned: plain}
+	return &harness{
+		proxy: srv, upstream: client, keyring: ring, gateway: p,
+		client: signing, unsigned: plain,
+	}
 }
 
 func (h *harness) url(key string) string {
@@ -573,7 +579,7 @@ func TestIntegrationRefusesUnsupported(t *testing.T) {
 	h.store(t, key, bytes.Repeat([]byte{7}, 1000))
 
 	t.Run("object sub-resources", func(t *testing.T) {
-		for _, suffix := range []string{"?acl", "?tagging", "?uploads", "?partNumber=1"} {
+		for _, suffix := range []string{"?acl", "?tagging", "?attributes", "?versionId=null"} {
 			resp, err := h.client.Get(h.url(key) + suffix)
 			if err != nil {
 				t.Fatalf("GET: %v", err)
@@ -581,6 +587,23 @@ func TestIntegrationRefusesUnsupported(t *testing.T) {
 			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusNotImplemented {
 				t.Errorf("%s returned %d, want 501", suffix, resp.StatusCode)
+			}
+		}
+	})
+
+	// The multipart sub-resources are implemented since M4, so a malformed one
+	// is a client error rather than an unimplemented feature. Both must still be
+	// refused: ?partNumber without an upload id used to fall through to the
+	// plain-object path, which would have stored one part as the whole object.
+	t.Run("malformed multipart requests", func(t *testing.T) {
+		for _, suffix := range []string{"?partNumber=1", "?uploadId="} {
+			resp, err := h.client.Get(h.url(key) + suffix)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s returned %d, want 400", suffix, resp.StatusCode)
 			}
 		}
 	})

@@ -57,6 +57,17 @@ var (
 	ErrIncompleteBody = &Error{"IncompleteBody",
 		"The request body terminated unexpectedly or was not framed correctly.",
 		http.StatusBadRequest}
+	// The multipart errors. Clients branch on these: the AWS SDKs treat
+	// NoSuchUpload as "this upload is gone, start again" rather than retrying.
+	ErrNoSuchUpload = &Error{"NoSuchUpload",
+		"The specified upload does not exist. It may have been completed, aborted, " +
+			"or expired.", http.StatusNotFound}
+	ErrInvalidPart = &Error{"InvalidPart",
+		"One or more of the specified parts could not be found. The part may not have been " +
+			"uploaded, or the entity tag may not match.", http.StatusBadRequest}
+	ErrInvalidPartOrder = &Error{"InvalidPartOrder",
+		"The list of parts was not in ascending order. Parts must be ordered by part number.",
+		http.StatusBadRequest}
 	ErrNotImplemented = &Error{"NotImplemented",
 		"A header or operation you provided implies functionality that is not implemented.",
 		http.StatusNotImplemented}

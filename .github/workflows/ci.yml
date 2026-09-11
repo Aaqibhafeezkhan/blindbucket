@@ -167,6 +167,47 @@ jobs:
             sleep 1
           done
 
+      # Multipart is where statelessness has to hold: parts of one upload are
+      # served by whichever instance the balancer picks, and nothing is shared
+      # between them but the keyring. A second instance behind a round-robin is
+      # the only way to test that claim rather than assert it.
+      - name: Start a second instance behind a round-robin balancer
+        env:
+          BLINDBUCKET_PASSPHRASE: ci-passphrase-not-a-secret
+        run: |
+          sed 's/127.0.0.1:9000/127.0.0.1:9010/' blindbucket.yaml > blindbucket-b.yaml
+          ./bin/blindbucket serve --config blindbucket-b.yaml > gateway-b.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:9010/; then break; fi
+            sleep 1
+          done
+
+          cat > nginx.conf <<'NGINX'
+          events {}
+          http {
+            upstream gateways {
+              server 127.0.0.1:9000;
+              server 127.0.0.1:9010;
+            }
+            server {
+              listen 9020;
+              client_max_body_size 0;
+              proxy_request_buffering off;   # keep the stream a stream
+              location / {
+                proxy_pass http://gateways;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+              }
+            }
+          }
+          NGINX
+          docker run -d --name lb --network host \
+            -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:alpine
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:9020/; then break; fi
+            sleep 1
+          done
+
       - name: boto3 scenarios
         env:
           AWS_ACCESS_KEY_ID: CITESTKEY
@@ -199,6 +240,67 @@ jobs:
 
           test "$(aws s3 ls s3://blindbucket-dev/ci/ | awk '{print $3}')" = "200000"
 
+      # Multipart through the balancer: the AWS CLI switches to it above 8 MiB on
+      # its own, so this is the client's code path and not a hand-built request.
+      - name: Multipart across two instances
+        env:
+          AWS_ACCESS_KEY_ID: CITESTKEY
+          AWS_SECRET_ACCESS_KEY: ci-test-secret-key
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ENDPOINT_URL: http://127.0.0.1:9020
+        run: |
+          set -euo pipefail
+          aws configure set default.s3.multipart_threshold 8MB
+          aws configure set default.s3.multipart_chunksize 8MB
+          aws configure set default.s3.max_concurrent_requests 8
+
+          head -c 41943040 /dev/urandom > big.bin        # 40 MiB, five parts
+          aws s3 cp big.bin s3://blindbucket-dev/ci/big.bin
+          aws s3 cp s3://blindbucket-dev/ci/big.bin big-restored.bin
+          cmp big.bin big-restored.bin
+
+          # The listing must report the plaintext size, recovered from the
+          # ciphertext size and the part count in the ETag alone.
+          test "$(aws s3 ls s3://blindbucket-dev/ci/big.bin | awk '{print $3}')" = "41943040"
+
+          # A range that straddles a part boundary exercises the prefix sums.
+          aws s3api get-object --bucket blindbucket-dev --key ci/big.bin \
+            --range bytes=8388598-8388618 slice.bin >/dev/null
+          dd if=big.bin of=expected-slice.bin bs=1 skip=8388598 count=21 status=none
+          cmp slice.bin expected-slice.bin
+
+          # Both instances must have served parts; if one served all of them the
+          # balancer, not the gateway, is what this proved.
+          a=$(grep -c '"op":"UploadPart"' gateway.log || true)
+          b=$(grep -c '"op":"UploadPart"' gateway-b.log || true)
+          echo "parts served: instance a=$a, instance b=$b"
+          test "$a" -gt 0 && test "$b" -gt 0
+
+      # gc has to leave a live object alone. Running it with the age guard off is
+      # the strict form: only the ordering rules of R4 stand between the pass and
+      # the manifest it must not touch.
+      - name: gc leaves a live multipart object readable
+        env:
+          BLINDBUCKET_PASSPHRASE: ci-passphrase-not-a-secret
+          AWS_ACCESS_KEY_ID: CITESTKEY
+          AWS_SECRET_ACCESS_KEY: ci-test-secret-key
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ENDPOINT_URL: http://127.0.0.1:9020
+        run: |
+          set -euo pipefail
+          ./bin/blindbucket gc --config blindbucket.yaml --dry-run s3://blindbucket-dev
+          ./bin/blindbucket gc --config blindbucket.yaml --min-age 0 s3://blindbucket-dev
+          aws s3 cp s3://blindbucket-dev/ci/big.bin after-gc.bin
+          cmp big.bin after-gc.bin
+
+      - name: Gateway logs on failure
+        if: failure()
+        run: |
+          echo "=== instance a ==="; tail -50 gateway.log || true
+          echo "=== instance b ==="; tail -50 gateway-b.log || true
+          echo "=== balancer ==="; docker logs lb 2>&1 | tail -30 || true
+          echo "=== minio ==="; docker logs minio 2>&1 | tail -30 || true
+
           aws s3 sync tree s3://blindbucket-dev/ci/sync/
           aws s3 sync s3://blindbucket-dev/ci/sync/ tree-back
           diff -r tree tree-back
@@ -210,11 +312,6 @@ jobs:
           aws s3 rm s3://blindbucket-dev/ci/sync/ --recursive
           aws s3 rm s3://blindbucket-dev/ci/payload.bin
 
-      - name: Gateway log on failure
-        if: failure()
-        run: |
-          cat gateway.log || true
-          docker logs minio || true
 
   vuln:
     name: govulncheck
