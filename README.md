@@ -6,9 +6,9 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 [![CI](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml/badge.svg)](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: pre-M1 — not usable yet.**
-> The repository skeleton, CI and the normative specifications are in place. The crypto
-> core is next. See [Roadmap](#roadmap) for exactly what does and does not exist.
+> **Status: M1 done — the crypto core works, the proxy does not exist yet.**
+> `blindbucket keygen`, `encrypt` and `decrypt` are usable today. There is no S3
+> endpoint until M2. See [Roadmap](#roadmap) for exactly what does and does not exist.
 
 ---
 
@@ -64,6 +64,64 @@ detectable.
 These are stated up front on purpose. The full analysis, including every residual risk, is
 in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 
+## Try it today
+
+The crypto core is usable on its own, which is the point of shipping it first:
+the format can be reviewed, fuzzed and measured before any HTTP is involved.
+
+```sh
+make build
+
+export BLINDBUCKET_PASSPHRASE='...'          # or --passphrase-file, or you are prompted
+./bin/blindbucket keygen  --out keyring.json --kid 2026-09
+
+./bin/blindbucket encrypt --keyring keyring.json -i big.tar.zst -o big.tar.zst.bb
+./bin/blindbucket decrypt --keyring keyring.json -i big.tar.zst.bb -o restored.tar.zst
+```
+
+The file starts with a small envelope naming the key that protects it, followed by
+one segment:
+
+```
+$ xxd -l 32 big.tar.zst.bb
+00000000: 4242 4631 0100 0732 3032 362d 3039 f973  BBF1...2026-09.s
+00000010: 24e6 d3e8 09dd 9e12 2848 6988 6498 a47b  $.......(Hi.d..{
+```
+
+Corrupt one bit anywhere and the decryption stops at that chunk, with nothing
+written to the output:
+
+```
+$ ./bin/blindbucket decrypt --keyring keyring.json -i tampered.bb -o out
+blindbucket: stream: integrity failure (chunk) at chunk 457: authentication failed (final=false)
+```
+
+## Numbers
+
+Measured on an Apple M4 with Go 1.27.1. Reproduce with `make bench`; the scripts
+and the caveats are in [bench/](bench/).
+
+| Measurement | Result |
+|---|---|
+| Encrypt, 64 KiB chunks | 7.2 GB/s |
+| Decrypt, 64 KiB chunks | 7.0 GB/s |
+| Allocations per chunk, steady state | **0** |
+| Allocations per 8 MiB stream | 22 encrypting, 26 decrypting — constant, not per chunk |
+| 10 GiB encrypt + decrypt | identical SHA-256, **0.5 MiB peak Go heap** |
+
+The allocation figures are the interesting ones. They do not change with the
+number of chunks, which is the whole of goal G3: memory is a function of how many
+streams are in flight, never of how large they are. AES-GCM runs well ahead of any
+network the proxy will sit behind, so the expected bottleneck is the upstream, not
+the cipher — an expectation M5 will confirm or refute with `warp` rather than
+assert.
+
+One honest asterisk: the CLI's peak resident memory is about 70 MiB, essentially
+all of it the 64 MiB Argon2id arena used once to unlock the keyring. That is a
+deliberate trade — memory hardness is the point of Argon2id — and it is why the
+constant-memory claim is measured on the Go heap rather than inferred from RSS.
+[ADR-002](docs/adr/ADR-002-key-hierarchy.md) records the reasoning.
+
 ## Documentation
 
 | Document | What it is |
@@ -71,6 +129,7 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 | [docs/FORMAT.md](docs/FORMAT.md) | Normative wire format. An independent implementation should be able to interoperate from this document alone. |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What is protected, what is not, and what the residual risks are. |
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
+| [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
 ## Roadmap
@@ -78,8 +137,8 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 | Milestone | Scope | Status |
 |---|---|---|
 | M0 | Repo, CI, format specification, threat model, ADR-001/002/011 | **done** |
-| M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | next |
-| M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | planned |
+| M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | **done** |
+| M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | next |
 | M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | planned |
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | planned |
 | M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
@@ -113,10 +172,21 @@ reason in [ADR-011](docs/adr/ADR-011-languages-outside-the-go-core.md).
 
 ## Reviews welcome
 
-The format is specified before it is implemented precisely so that it can be reviewed. If
-you find a weakness in [docs/FORMAT.md](docs/FORMAT.md) or in the reasoning in
-[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), please open an issue — that is the most
-valuable contribution this project can receive.
+The format was specified before it was implemented precisely so that it can be reviewed,
+and [testdata/vectors/segment_v1.json](testdata/vectors/segment_v1.json) fixes every input
+so an independent implementation can check itself against it.
+
+Every guarantee is backed by tests that play an actively hostile storage provider and
+require an error rather than plaintext: every single-bit flip across all 32 header bytes,
+tampered chunk data and tags, swapped and duplicated chunks, truncation at and inside chunk
+boundaries, appended bytes, forged chunk sizes, and multipart segments served under the
+wrong part number. A fuzz target additionally requires that anything the decoder accepts
+re-encrypts to the identical bytes, which rules out two ciphertexts decoding to one
+plaintext.
+
+If you find a weakness in [docs/FORMAT.md](docs/FORMAT.md), in the reasoning in
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), or an attack the tests miss, please open an
+issue — that is the most valuable contribution this project can receive.
 
 ## License
 

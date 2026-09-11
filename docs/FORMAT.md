@@ -389,12 +389,34 @@ the same key is not detectable at the format level. See
 
 ## 12. Test vectors
 
-Known-answer test vectors live in [`testdata/vectors/`](../testdata/vectors/) and are
-a normative part of this specification. Each vector fixes the DEK, the salt and all
-header fields, so the expected ciphertext is fully determined. An independent
+Known-answer test vectors live in
+[`testdata/vectors/segment_v1.json`](../testdata/vectors/segment_v1.json) and are a
+normative part of this specification. Each vector fixes the DEK, the salt and every
+header field, so the expected ciphertext is fully determined. An independent
 implementation that reproduces every vector byte for byte is format-compatible.
 
-*Vectors are generated in M1, together with the reference implementation.*
+Each entry is hex-encoded and carries:
+
+| Field | Meaning |
+|---|---|
+| `dek` | the 32-byte data encryption key |
+| `salt` | the 20-byte segment salt, which goes into the header at offset 12 |
+| `log2_chunk_size`, `multipart`, `index` | the remaining header fields |
+| `plaintext` | the input |
+| `ciphertext` | the complete segment, header included |
+
+The ten vectors cover the sizes where an encoder's final-chunk handling either
+works or does not -- empty, one byte, one short of a chunk, exactly a chunk, one
+past a chunk, and a multi-chunk case -- plus the smallest, default and largest
+chunk sizes and both multipart boundaries (part 1 and part 10000).
+
+Regenerate them after a deliberate format change with:
+
+```sh
+go test ./internal/crypto/stream -run TestKnownAnswerVectors -update
+```
+
+A change that was *not* deliberate shows up as a failure of that same test.
 
 ---
 

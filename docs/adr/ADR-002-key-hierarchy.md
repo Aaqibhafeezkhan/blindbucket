@@ -89,3 +89,16 @@ their metadata, undetected.
   changes. Copies can therefore not be pure server-side metadata passthrough; the proxy must
   be in the path with `x-amz-metadata-directive: REPLACE`.
 - Roughly 150 bytes of the 2 KB S3 user-metadata budget are consumed by `bb-` headers.
+- Argon2id at the RFC 9106 parameters allocates 64 MiB while the keyring is
+  unlocked, which dominates the process's peak resident memory. Measured: peak RSS
+  is ~70 MiB whether the CLI processes 64 MiB or 4 GiB, so the cost is entirely
+  the KDF and entirely one-time. The streaming path's own heap stays at roughly
+  0.5 MiB for a 10 GiB object.
+
+  This conflicts with the literal reading of goal G3's 20 MiB CLI budget, and the
+  conflict is resolved in favour of the KDF: memory hardness is the whole point of
+  Argon2id, and lowering it to fit a number would trade real resistance against a
+  stolen keyring for a cosmetic figure. G3's claim is what it was always about --
+  memory that does not grow with the object -- and that is measured directly on the
+  Go heap rather than inferred from RSS. The proxy unlocks its keyring once at
+  startup, where the spike is irrelevant.
