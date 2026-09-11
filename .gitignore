@@ -1,0 +1,28 @@
+# Build output
+/bin/
+/dist/
+blindbucket
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Fuzzing corpus found by the local runner (seed corpora under testdata/ are committed)
+/testdata/fuzz/
+
+# Benchmark results
+/bench/results/
+
+# Local configuration and anything key-shaped — never committed
+*.local.yaml
+*.local.yml
+keyring.json
+*.pem
+*.key
+*.crt
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
