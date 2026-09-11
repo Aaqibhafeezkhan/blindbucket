@@ -55,11 +55,17 @@ func (c *Client) PutObject(ctx context.Context, in PutObjectInput) (*PutObjectOu
 	if err != nil {
 		return nil, err
 	}
-	body := in.Body
-	if body == nil {
-		body = strings.NewReader("")
+	// http.NoBody rather than an empty reader: net/http treats a non-nil Body
+	// with ContentLength 0 as "length unknown" and switches to chunked encoding,
+	// which S3 answers with 411. An empty object is a legitimate thing to store.
+	if in.ContentLength == 0 {
+		req.Body = http.NoBody
+	} else {
+		if in.Body == nil {
+			return nil, errors.New("upstream: PutObject has no body but a non-zero content length")
+		}
+		req.Body = io.NopCloser(in.Body)
 	}
-	req.Body = io.NopCloser(body)
 	req.ContentLength = in.ContentLength
 	applyObjectHeaders(req.Header, in)
 

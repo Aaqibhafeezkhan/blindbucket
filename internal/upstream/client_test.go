@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -289,6 +290,36 @@ func TestRetryPolicy(t *testing.T) {
 			t.Errorf("made %d attempts, want exactly 1", attempts)
 		}
 	})
+}
+
+// TestEmptyBodySendsContentLength guards a subtle net/http behaviour: a non-nil
+// Body with ContentLength 0 means "length unknown", so the transport switches to
+// chunked encoding and S3 answers 411. An empty object must still be storable.
+func TestEmptyBodySendsContentLength(t *testing.T) {
+	t.Parallel()
+
+	var gotLength int64
+	var gotChunked bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLength = r.ContentLength
+		gotChunked = slices.Contains(r.TransferEncoding, "chunked")
+		w.Header().Set("ETag", `"empty"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv.URL)
+	if _, err := c.PutObject(context.Background(), PutObjectInput{
+		Bucket: "bucket", Key: "empty", Body: strings.NewReader(""), ContentLength: 0,
+	}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if gotChunked {
+		t.Error("an empty body was sent with chunked encoding, which S3 rejects with 411")
+	}
+	if gotLength != 0 {
+		t.Errorf("ContentLength = %d, want 0", gotLength)
+	}
 }
 
 func TestParseContentRangeTotal(t *testing.T) {
