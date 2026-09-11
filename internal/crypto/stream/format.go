@@ -68,15 +68,45 @@ type SegmentParams struct {
 	Index uint32
 }
 
-// Validate reports whether p is a permitted combination of header fields.
+// AnyChunkSize is a wildcard for the Log2ChunkSize of a decoder expectation: it
+// accepts whatever chunk size the segment header declares.
 //
-// The flag and index must agree: a single-part segment carries index 0, and a
-// multipart segment carries a valid S3 part number. Without this rule there would
-// be headers that parse but denote nothing.
+// It exists because the two directions genuinely differ. An encoder must be told
+// the chunk size, since it decides one. A decoder often cannot know it in
+// advance -- the local file format carries it in the segment header, and nothing
+// else in the file repeats it -- so demanding one up front would force callers to
+// guess. Zero is unambiguous as a sentinel because it is not a permitted size.
+//
+// Callers that do know the size should still state it. The proxy does: its size
+// arithmetic for HEAD and listings depends on the configured chunk size, so a
+// segment written with a different one must be rejected rather than silently
+// decoded into wrong sizes.
+const AnyChunkSize uint8 = 0
+
+// Validate reports whether p is a permitted set of header fields to encode.
 func (p SegmentParams) Validate() error {
 	if err := ValidateLog2ChunkSize(p.Log2ChunkSize); err != nil {
 		return err
 	}
+	return p.validateIdentity()
+}
+
+// validateExpectation reports whether p is usable as a decoder expectation,
+// where the chunk size may be left as AnyChunkSize.
+func (p SegmentParams) validateExpectation() error {
+	if p.Log2ChunkSize != AnyChunkSize {
+		if err := ValidateLog2ChunkSize(p.Log2ChunkSize); err != nil {
+			return err
+		}
+	}
+	return p.validateIdentity()
+}
+
+// validateIdentity checks that the flag and the index agree: a single-part
+// segment carries index 0, and a multipart segment carries a valid S3 part
+// number. Without this rule there would be headers that parse but denote
+// nothing.
+func (p SegmentParams) validateIdentity() error {
 	if p.Multipart {
 		if p.Index < 1 || p.Index > MaxParts {
 			return fmt.Errorf("stream: multipart segment index %d outside 1..%d", p.Index, MaxParts)

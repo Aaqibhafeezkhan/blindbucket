@@ -105,7 +105,7 @@ func parseHeader(b []byte) (header, error) {
 // chunk -- but failing here produces a precise error before any decryption work.
 func (h header) requireParams(want SegmentParams) error {
 	switch {
-	case h.params.Log2ChunkSize != want.Log2ChunkSize:
+	case want.Log2ChunkSize != AnyChunkSize && h.params.Log2ChunkSize != want.Log2ChunkSize:
 		return integrityf(KindHeader, "chunk size 2^%d, want 2^%d",
 			h.params.Log2ChunkSize, want.Log2ChunkSize)
 	case h.params.Multipart != want.Multipart:

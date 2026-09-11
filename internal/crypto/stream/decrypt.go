@@ -40,7 +40,7 @@ type DecryptReader struct {
 // size, the multipart flag or the segment index is an error -- this is what
 // catches a provider serving a different part than the one asked for.
 func NewDecryptReader(src io.Reader, dek []byte, want SegmentParams) (*DecryptReader, error) {
-	if err := want.Validate(); err != nil {
+	if err := want.validateExpectation(); err != nil {
 		return nil, err
 	}
 
