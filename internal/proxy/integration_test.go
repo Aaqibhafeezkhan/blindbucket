@@ -1,0 +1,628 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
+	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
+	"github.com/LennardGeissler/blindbucket/internal/upstream"
+)
+
+// These tests need a real S3-compatible provider, because the interesting
+// failures are the ones a fake would paper over: what a provider stores, what it
+// returns, and what happens when the stored bytes are changed behind the
+// proxy's back.
+//
+//	docker compose up -d
+//	BLINDBUCKET_TEST_S3_ENDPOINT=http://localhost:9002 go test ./internal/proxy
+const (
+	endpointEnv = "BLINDBUCKET_TEST_S3_ENDPOINT"
+	testBucket  = "blindbucket-test"
+)
+
+type harness struct {
+	proxy    *httptest.Server
+	upstream *upstream.Client
+	keyring  *keys.Keyring
+	client   *http.Client
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	endpoint := os.Getenv(endpointEnv)
+	if endpoint == "" {
+		t.Skipf("set %s to run these against a real provider (docker compose up -d)", endpointEnv)
+	}
+
+	client, err := upstream.New(upstream.Config{
+		Endpoint: endpoint, Region: "us-east-1", PathStyle: true,
+		AccessKeyID: "minioadmin", SecretAccessKey: "minioadmin",
+	})
+	if err != nil {
+		t.Fatalf("upstream.New: %v", err)
+	}
+
+	ring := keys.NewKeyring()
+	if err := ring.Generate("test-key"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	p, err := New(Config{
+		Upstream: client, Keys: ring, Log2ChunkSize: stream.MinLog2ChunkSize,
+		// Discard: these tests deliberately provoke errors, and the log noise
+		// would drown the failures that matter.
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	return &harness{proxy: srv, upstream: client, keyring: ring, client: srv.Client()}
+}
+
+func (h *harness) url(key string) string {
+	return h.proxy.URL + "/" + testBucket + "/" + key
+}
+
+func (h *harness) put(t *testing.T, key string, body []byte, headers map[string]string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, h.url(key), bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.ContentLength = int64(len(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	return resp
+}
+
+func (h *harness) do(t *testing.T, method, key string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, h.url(key), nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		t.Fatalf("%s: %v", method, err)
+	}
+	return resp
+}
+
+// store uploads through the proxy and registers cleanup.
+func (h *harness) store(t *testing.T, key string, body []byte) {
+	t.Helper()
+	resp := h.put(t, key, body, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT returned %d: %s", resp.StatusCode, readBody(t, resp))
+	}
+	t.Cleanup(func() {
+		_ = h.upstream.DeleteObject(context.Background(), testBucket, key)
+	})
+}
+
+// rewriteUpstream replaces an object's stored bytes while keeping its metadata,
+// which is how an actively hostile provider would behave.
+func (h *harness) rewriteUpstream(t *testing.T, key string, mutate func([]byte) []byte) {
+	t.Helper()
+	ctx := context.Background()
+
+	get, err := h.upstream.GetObject(ctx, upstream.GetObjectInput{Bucket: testBucket, Key: key})
+	if err != nil {
+		t.Fatalf("reading the stored object: %v", err)
+	}
+	stored, err := io.ReadAll(get.Body)
+	_ = get.Body.Close()
+	if err != nil {
+		t.Fatalf("reading the stored object: %v", err)
+	}
+
+	modified := mutate(stored)
+	if _, err := h.upstream.PutObject(ctx, upstream.PutObjectInput{
+		Bucket: testBucket, Key: key,
+		Body: bytes.NewReader(modified), ContentLength: int64(len(modified)),
+		Metadata: get.Metadata,
+	}); err != nil {
+		t.Fatalf("writing the modified object: %v", err)
+	}
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return string(b)
+}
+
+func testKey(t *testing.T, suffix string) string {
+	t.Helper()
+	return fmt.Sprintf("proxy-test/%s/%d/%s", strings.ReplaceAll(t.Name(), "/", "_"),
+		time.Now().UnixNano(), suffix)
+}
+
+func TestIntegrationRoundTrip(t *testing.T) {
+	h := newHarness(t)
+
+	for _, size := range []int{0, 1, 4095, 4096, 4097, 100_000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			key := testKey(t, "object.bin")
+			payload := make([]byte, size)
+			if _, err := rand.Read(payload); err != nil {
+				t.Fatalf("rand: %v", err)
+			}
+			h.store(t, key, payload)
+
+			// What the provider holds must be the blindbucket format, at the
+			// size the arithmetic predicts -- never the plaintext.
+			info, err := h.upstream.HeadObject(context.Background(), testBucket, key)
+			if err != nil {
+				t.Fatalf("HeadObject upstream: %v", err)
+			}
+			wantSealed, err := stream.SealedSize(int64(size), stream.MinLog2ChunkSize)
+			if err != nil {
+				t.Fatalf("SealedSize: %v", err)
+			}
+			if info.ContentLength != wantSealed {
+				t.Errorf("provider stores %d bytes, the format says %d", info.ContentLength, wantSealed)
+			}
+
+			// HEAD through the proxy reports the plaintext size.
+			head := h.do(t, http.MethodHead, key)
+			_ = head.Body.Close()
+			if head.ContentLength != int64(size) {
+				t.Errorf("HEAD reports %d bytes, want %d", head.ContentLength, size)
+			}
+			if head.Header.Get("X-Amz-Meta-Bb-Dek") != "" {
+				t.Error("the wrapped key leaked into a response to the client")
+			}
+
+			// GET returns the original bytes.
+			get := h.do(t, http.MethodGet, key)
+			defer func() { _ = get.Body.Close() }()
+			if get.ContentLength != int64(size) {
+				t.Errorf("GET declares %d bytes, want %d", get.ContentLength, size)
+			}
+			body, err := io.ReadAll(get.Body)
+			if err != nil {
+				t.Fatalf("reading the response: %v", err)
+			}
+			if sha256.Sum256(body) != sha256.Sum256(payload) {
+				t.Error("the object came back different from what was sent")
+			}
+		})
+	}
+}
+
+func TestIntegrationCiphertextIsOpaque(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "secret.txt")
+	secret := bytes.Repeat([]byte("TOP SECRET PAYLOAD "), 500)
+	h.store(t, key, secret)
+
+	get, err := h.upstream.GetObject(context.Background(), upstream.GetObjectInput{
+		Bucket: testBucket, Key: key,
+	})
+	if err != nil {
+		t.Fatalf("GetObject upstream: %v", err)
+	}
+	stored, err := io.ReadAll(get.Body)
+	_ = get.Body.Close()
+	if err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+
+	if bytes.Contains(stored, []byte("TOP SECRET")) {
+		t.Fatal("plaintext reached the storage provider")
+	}
+	if !bytes.HasPrefix(stored, []byte("BLBK")) {
+		t.Errorf("stored object does not start with the segment magic: %x", stored[:8])
+	}
+	if stored[4] != stream.Version {
+		t.Errorf("stored format version is %d, want %d", stored[4], stream.Version)
+	}
+	if stored[5] != stream.MinLog2ChunkSize {
+		t.Errorf("stored chunk size is 2^%d, want 2^%d", stored[5], stream.MinLog2ChunkSize)
+	}
+}
+
+func TestIntegrationMetadataHandling(t *testing.T) {
+	h := newHarness(t)
+
+	t.Run("client metadata survives, gateway metadata is hidden", func(t *testing.T) {
+		key := testKey(t, "meta.bin")
+		resp := h.put(t, key, []byte("payload"), map[string]string{
+			"Content-Type":      "text/plain",
+			"X-Amz-Meta-Origin": "integration-test",
+			"Cache-Control":     "max-age=60",
+		})
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT returned %d", resp.StatusCode)
+		}
+		t.Cleanup(func() { _ = h.upstream.DeleteObject(context.Background(), testBucket, key) })
+
+		head := h.do(t, http.MethodHead, key)
+		_ = head.Body.Close()
+		if got := head.Header.Get("X-Amz-Meta-Origin"); got != "integration-test" {
+			t.Errorf("client metadata = %q, want it preserved", got)
+		}
+		if got := head.Header.Get("Content-Type"); got != "text/plain" {
+			t.Errorf("Content-Type = %q, want it preserved", got)
+		}
+		if got := head.Header.Get("Cache-Control"); got != "max-age=60" {
+			t.Errorf("Cache-Control = %q, want it preserved", got)
+		}
+		for _, name := range []string{"X-Amz-Meta-Bb-V", "X-Amz-Meta-Bb-Kid", "X-Amz-Meta-Bb-Dek", "X-Amz-Meta-Bb-C"} {
+			if head.Header.Get(name) != "" {
+				t.Errorf("%s leaked to the client", name)
+			}
+		}
+	})
+
+	t.Run("clients may not write the reserved prefix", func(t *testing.T) {
+		key := testKey(t, "forged.bin")
+		resp := h.put(t, key, []byte("payload"), map[string]string{
+			"X-Amz-Meta-Bb-Dek": "forged",
+		})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status %d, want 400: a client must not be able to set its own wrapped key", resp.StatusCode)
+		}
+	})
+}
+
+// TestIntegrationTamperedObject is the heart of it: an actively hostile
+// provider must never produce plaintext.
+func TestIntegrationTamperedObject(t *testing.T) {
+	h := newHarness(t)
+	const chunk = 1 << stream.MinLog2ChunkSize
+
+	t.Run("tampering in a later chunk aborts the response", func(t *testing.T) {
+		key := testKey(t, "late.bin")
+		payload := bytes.Repeat([]byte{0xAB}, 5*chunk)
+		h.store(t, key, payload)
+
+		// Corrupt the third chunk, which the client only reaches after the
+		// status line is already on the wire.
+		h.rewriteUpstream(t, key, func(b []byte) []byte {
+			b[stream.HeaderSize+2*(chunk+stream.TagSize)+9] ^= 0x01
+			return b
+		})
+
+		get := h.do(t, http.MethodGet, key)
+		defer func() { _ = get.Body.Close() }()
+		if get.StatusCode != http.StatusOK {
+			t.Fatalf("status %d: the failure is expected mid-body, not before it", get.StatusCode)
+		}
+
+		body, err := io.ReadAll(get.Body)
+		if err == nil {
+			t.Fatal("the response completed despite corrupted data")
+		}
+		if int64(len(body)) >= get.ContentLength {
+			t.Errorf("delivered %d of %d declared bytes; a client could mistake this for success",
+				len(body), get.ContentLength)
+		}
+		// Whatever did arrive must be authentic: only verified chunks are released.
+		if !bytes.Equal(body, payload[:len(body)]) {
+			t.Error("the bytes delivered before the abort were not authentic plaintext")
+		}
+	})
+
+	t.Run("tampering in the first chunk yields a clean error", func(t *testing.T) {
+		key := testKey(t, "early.bin")
+		h.store(t, key, bytes.Repeat([]byte{0xCD}, 3*chunk))
+
+		h.rewriteUpstream(t, key, func(b []byte) []byte {
+			b[stream.HeaderSize+5] ^= 0x01
+			return b
+		})
+
+		get := h.do(t, http.MethodGet, key)
+		defer func() { _ = get.Body.Close() }()
+		if get.StatusCode != http.StatusBadGateway {
+			t.Errorf("status %d, want 502 with an S3 error document", get.StatusCode)
+		}
+		if body := readBody(t, get); !strings.Contains(body, "IntegrityCheckFailed") {
+			t.Errorf("body = %q, want an IntegrityCheckFailed error", body)
+		}
+	})
+
+	t.Run("truncation is detected", func(t *testing.T) {
+		key := testKey(t, "truncated.bin")
+		h.store(t, key, bytes.Repeat([]byte{0xEF}, 3*chunk))
+
+		h.rewriteUpstream(t, key, func(b []byte) []byte {
+			return b[:stream.HeaderSize+2*(chunk+stream.TagSize)]
+		})
+
+		get := h.do(t, http.MethodGet, key)
+		defer func() { _ = get.Body.Close() }()
+		// A truncated object has an impossible ciphertext length, so this is
+		// caught before any byte is served.
+		if get.StatusCode == http.StatusOK {
+			if _, err := io.ReadAll(get.Body); err == nil {
+				t.Error("a truncated object was served as if complete")
+			}
+			return
+		}
+		if get.StatusCode != http.StatusBadGateway {
+			t.Errorf("status %d, want 502", get.StatusCode)
+		}
+	})
+
+	t.Run("swapping two objects' bodies is detected", func(t *testing.T) {
+		keyA, keyB := testKey(t, "a.bin"), testKey(t, "b.bin")
+		h.store(t, keyA, bytes.Repeat([]byte{1}, 2*chunk))
+		h.store(t, keyB, bytes.Repeat([]byte{2}, 2*chunk))
+
+		ctx := context.Background()
+		get, err := h.upstream.GetObject(ctx, upstream.GetObjectInput{Bucket: testBucket, Key: keyB})
+		if err != nil {
+			t.Fatalf("reading B: %v", err)
+		}
+		bodyB, err := io.ReadAll(get.Body)
+		_ = get.Body.Close()
+		if err != nil {
+			t.Fatalf("reading B: %v", err)
+		}
+
+		// B's body under A's key and metadata: the data key is bound to the key
+		// name, so A's key cannot open B's segment.
+		h.rewriteUpstream(t, keyA, func([]byte) []byte { return bodyB })
+
+		resp := h.do(t, http.MethodGet, keyA)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(resp.Body)
+			if err == nil {
+				t.Errorf("a swapped body was served as plaintext (%d bytes)", len(body))
+			}
+			return
+		}
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status %d, want 502", resp.StatusCode)
+		}
+	})
+
+	t.Run("a forged wrapped key is rejected", func(t *testing.T) {
+		key := testKey(t, "forged-dek.bin")
+		h.store(t, key, bytes.Repeat([]byte{3}, chunk))
+
+		ctx := context.Background()
+		get, err := h.upstream.GetObject(ctx, upstream.GetObjectInput{Bucket: testBucket, Key: key})
+		if err != nil {
+			t.Fatalf("reading: %v", err)
+		}
+		stored, err := io.ReadAll(get.Body)
+		_ = get.Body.Close()
+		if err != nil {
+			t.Fatalf("reading: %v", err)
+		}
+
+		metadata := get.Metadata
+		forged := keys.EncodeWrapped(bytes.Repeat([]byte{0}, keys.WrappedDEKSize))
+		for name := range metadata {
+			if strings.EqualFold(name, "bb-dek") {
+				metadata[name] = forged
+			}
+		}
+		if _, err := h.upstream.PutObject(ctx, upstream.PutObjectInput{
+			Bucket: testBucket, Key: key,
+			Body: bytes.NewReader(stored), ContentLength: int64(len(stored)),
+			Metadata: metadata,
+		}); err != nil {
+			t.Fatalf("writing the forged object: %v", err)
+		}
+
+		resp := h.do(t, http.MethodGet, key)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status %d, want 502", resp.StatusCode)
+		}
+	})
+}
+
+// TestIntegrationForeignObject covers a bucket that also holds objects this
+// gateway did not write.
+func TestIntegrationForeignObject(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "foreign.txt")
+
+	if _, err := h.upstream.PutObject(context.Background(), upstream.PutObjectInput{
+		Bucket: testBucket, Key: key,
+		Body: strings.NewReader("written without the gateway"), ContentLength: 27,
+	}); err != nil {
+		t.Fatalf("PutObject upstream: %v", err)
+	}
+	t.Cleanup(func() { _ = h.upstream.DeleteObject(context.Background(), testBucket, key) })
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		resp := h.do(t, method, key)
+		body := readBody(t, resp)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("%s returned %d, want 502 -- an unencrypted object must not be served silently",
+				method, resp.StatusCode)
+		}
+		if method == http.MethodGet && !strings.Contains(body, "ObjectNotEncrypted") {
+			t.Errorf("GET body = %q, want an ObjectNotEncrypted error", body)
+		}
+	}
+}
+
+func TestIntegrationDeleteAndMissing(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "transient.bin")
+
+	resp := h.put(t, key, []byte("payload"), nil)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT returned %d", resp.StatusCode)
+	}
+
+	del := h.do(t, http.MethodDelete, key)
+	_ = del.Body.Close()
+	if del.StatusCode != http.StatusNoContent {
+		t.Errorf("DELETE returned %d, want 204", del.StatusCode)
+	}
+
+	get := h.do(t, http.MethodGet, key)
+	body := readBody(t, get)
+	_ = get.Body.Close()
+	if get.StatusCode != http.StatusNotFound {
+		t.Errorf("GET after DELETE returned %d, want 404", get.StatusCode)
+	}
+	if !strings.Contains(body, "NoSuchKey") {
+		t.Errorf("body = %q, want NoSuchKey", body)
+	}
+}
+
+// TestIntegrationRefusesUnsupported checks that nothing this build cannot do is
+// quietly accepted. Ignoring a checksum a client sent would turn a detectable
+// corruption into an undetectable one.
+func TestIntegrationRefusesUnsupported(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "unsupported.bin")
+
+	t.Run("client checksums", func(t *testing.T) {
+		resp := h.put(t, key, []byte("payload"), map[string]string{
+			"X-Amz-Checksum-Crc32": "AAAAAA==",
+		})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("status %d, want 501", resp.StatusCode)
+		}
+	})
+
+	t.Run("content-md5", func(t *testing.T) {
+		resp := h.put(t, key, []byte("payload"), map[string]string{
+			"Content-MD5": "1B2M2Y8AsgTpgAmY7PhCfg==",
+		})
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("status %d, want 501", resp.StatusCode)
+		}
+	})
+
+	t.Run("range requests", func(t *testing.T) {
+		h.store(t, key, bytes.Repeat([]byte{7}, 1000))
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, h.url(key), nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		req.Header.Set("Range", "bytes=0-99")
+		resp, err := h.client.Do(req)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("status %d, want 501", resp.StatusCode)
+		}
+	})
+
+	t.Run("sub-resources", func(t *testing.T) {
+		resp, err := h.client.Get(h.url(key) + "?acl")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("status %d, want 501: ?acl must not be served as a plain GET", resp.StatusCode)
+		}
+	})
+
+	t.Run("the reserved prefix", func(t *testing.T) {
+		resp, err := h.client.Get(h.proxy.URL + "/" + testBucket + "/.blindbucket/m/anything")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("status %d, want 403", resp.StatusCode)
+		}
+	})
+}
+
+// TestIntegrationNoLengthNoUpload covers the streaming constraint: without a
+// length there is no upstream Content-Length, and buffering to find out is
+// exactly what this proxy will not do.
+func TestIntegrationChunkedUploadRefused(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "chunked.bin")
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, h.url(key),
+		io.NopCloser(strings.NewReader("payload")))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.ContentLength = -1 // forces Transfer-Encoding: chunked
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusLengthRequired {
+		t.Errorf("status %d, want 411", resp.StatusCode)
+	}
+	if body := readBody(t, resp); !strings.Contains(body, "MissingContentLength") {
+		t.Errorf("body = %q, want MissingContentLength", body)
+	}
+	if _, err := h.upstream.HeadObject(context.Background(), testBucket, key); !upstream.NotFound(err) {
+		t.Error("a refused upload left an object behind")
+	}
+}
+
+// TestIntegrationAbortedUploadStoresNothing checks that a client which stops
+// mid-body leaves no object: the final chunk is only written on a clean close.
+func TestIntegrationAbortedUploadStoresNothing(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "aborted.bin")
+
+	// Declare more bytes than the body will produce.
+	body := io.MultiReader(bytes.NewReader(bytes.Repeat([]byte{9}, 1000)), errReader{})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, h.url(key), body)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.ContentLength = 100000
+
+	resp, err := h.client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+	}
+
+	if _, err := h.upstream.HeadObject(context.Background(), testBucket, key); !upstream.NotFound(err) {
+		t.Errorf("an aborted upload left an object behind (err = %v)", err)
+	}
+}
+
+// errReader fails partway through a body, standing in for a client that goes
+// away mid-upload.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("client went away") }
