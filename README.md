@@ -6,11 +6,12 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 [![CI](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml/badge.svg)](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: M2 done — the gateway runs, for whole objects.**
-> `PutObject`, `GetObject`, `HeadObject` and `DeleteObject` work through a real S3
-> endpoint. Client signatures are not verified yet and range requests are not
-> implemented, so run it on loopback until M3. See [Roadmap](#roadmap) for exactly
-> what does and does not exist.
+> **Status: M3 done — standard S3 clients work, below the multipart threshold.**
+> AWS CLI, boto3, `mc` and rclone all round-trip through the gateway. Client
+> requests are authenticated with SigV4; ranges, listings and checksums work.
+> Multipart uploads arrive with M4, so `aws s3 cp` of a file over 8 MiB still
+> fails — cleanly. See [Roadmap](#roadmap) and
+> [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ---
 
@@ -84,8 +85,10 @@ Then point any S3 client at it. Nothing about the client changes except the
 endpoint:
 
 ```sh
-curl -T big.tar.zst http://127.0.0.1:9000/blindbucket-dev/big.tar.zst
-curl -o restored.tar.zst http://127.0.0.1:9000/blindbucket-dev/big.tar.zst
+export AWS_ENDPOINT_URL=http://127.0.0.1:9000
+aws s3 cp big.tar.zst s3://blindbucket-dev/
+aws s3 ls s3://blindbucket-dev/
+aws s3 sync ./backups s3://blindbucket-dev/backups/
 ```
 
 `HEAD` reports the plaintext size, while the provider is holding something else
@@ -131,6 +134,25 @@ and the caveats are in [bench/](bench/).
 | 10 GiB encrypt + decrypt | identical SHA-256, **0.5 MiB peak Go heap** |
 | 5 GiB through the gateway to MinIO | identical SHA-256, **12 MiB resident** while streaming |
 
+## Clients
+
+Measured by pointing each client at the gateway and running it, not by reading a
+specification. Full detail and the exact commands are in
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+| Client | Status | Needs |
+|---|---|---|
+| AWS CLI v2 | works — `cp`, `ls`, `rm`, `sync`, ranges | nothing |
+| boto3 | works — including paginators and delimiters | nothing |
+| MinIO `mc` | works — `cp`, `ls`, `mirror`, `cat` | nothing |
+| rclone | works | `--ignore-checksum`, and `allow_unsigned_payload` on the proxy |
+
+Two of those needed a fix that only a real client could have found: `mc` sends an
+aws-chunked body with no trailer section at all, and rclone attaches an `?x-id=`
+parameter that the router was refusing as an unknown sub-resource. boto3 found a
+third — user metadata was arriving with Go's canonical header casing, so
+`response["Metadata"]["origin"]` came back as `"Origin"` and every lookup missed.
+
 The allocation figures are the interesting ones. They do not change with the
 number of chunks, which is the whole of goal G3: memory is a function of how many
 streams are in flight, never of how large they are. AES-GCM runs well ahead of any
@@ -150,6 +172,7 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 |---|---|
 | [docs/FORMAT.md](docs/FORMAT.md) | Normative wire format. An independent implementation should be able to interoperate from this document alone. |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What is protected, what is not, and what the residual risks are. |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Which clients work, which settings they need, and what does not work yet. Measured, not assumed. |
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
@@ -161,8 +184,8 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M0 | Repo, CI, format specification, threat model, ADR-001/002/011 | **done** |
 | M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | **done** |
 | M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | **done** |
-| M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | next |
-| M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | planned |
+| M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | **done** |
+| M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | next |
 | M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
 | — | Independent Python reference decoder, differential fuzzing | optional |
 | M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics, benchmarks | planned |
@@ -194,6 +217,9 @@ The integration tests need a provider and skip without one:
 ```sh
 docker compose up -d
 BLINDBUCKET_TEST_S3_ENDPOINT=http://localhost:9002 go test ./internal/upstream ./internal/proxy
+
+# and against a running gateway, with a real client:
+python3 test/integration/clients/boto3/scenarios.py
 ```
 
 Production code is Go, without exception. Anything else in this repository has a written

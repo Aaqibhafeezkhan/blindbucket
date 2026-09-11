@@ -109,6 +109,113 @@ jobs:
         if: failure()
         run: docker logs minio
 
+  clients:
+    name: Client compatibility (AWS CLI, boto3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9002:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:9002/minio/health/live >/dev/null; then break; fi
+            sleep 1
+          done
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:latest -c \
+            "mc alias set local http://localhost:9002 minioadmin minioadmin && \
+             mc mb --ignore-existing local/blindbucket-dev"
+
+      - name: Start the gateway
+        env:
+          BLINDBUCKET_PASSPHRASE: ci-passphrase-not-a-secret
+        run: |
+          make build
+          ./bin/blindbucket keygen --out keyring.json --kid ci
+          cat > blindbucket.yaml <<'YAML'
+          server:
+            listen: "127.0.0.1:9000"
+          upstream:
+            endpoint: http://localhost:9002
+            region: us-east-1
+            path_style: true
+            access_key_id: minioadmin
+            secret_access_key: minioadmin
+          clients:
+            - name: ci
+              access_key_id: CITESTKEY
+              secret_access_key: ci-test-secret-key
+              buckets: ["blindbucket-dev"]
+          keys:
+            provider: file
+            keyring: keyring.json
+          crypto:
+            log2_chunk_size: 16
+          YAML
+          ./bin/blindbucket serve --config blindbucket.yaml > gateway.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:9000/; then break; fi
+            sleep 1
+          done
+
+      - name: boto3 scenarios
+        env:
+          AWS_ACCESS_KEY_ID: CITESTKEY
+          AWS_SECRET_ACCESS_KEY: ci-test-secret-key
+          AWS_DEFAULT_REGION: us-east-1
+          BLINDBUCKET_ENDPOINT: http://127.0.0.1:9000
+          BLINDBUCKET_BUCKET: blindbucket-dev
+        run: |
+          pip install --quiet boto3
+          python3 test/integration/clients/boto3/scenarios.py
+
+      # The AWS CLI is preinstalled on GitHub runners. `aws s3 cp` exercises the
+      # aws-chunked path with a trailer checksum, which boto3's put_object does
+      # not.
+      - name: AWS CLI scenarios
+        env:
+          AWS_ACCESS_KEY_ID: CITESTKEY
+          AWS_SECRET_ACCESS_KEY: ci-test-secret-key
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ENDPOINT_URL: http://127.0.0.1:9000
+        run: |
+          set -euo pipefail
+          head -c 200000 /dev/urandom > payload.bin
+          mkdir -p tree/sub && head -c 5000 /dev/urandom > tree/a.bin \
+            && head -c 60000 /dev/urandom > tree/sub/b.bin
+
+          aws s3 cp payload.bin s3://blindbucket-dev/ci/payload.bin
+          aws s3 cp s3://blindbucket-dev/ci/payload.bin restored.bin
+          cmp payload.bin restored.bin
+
+          test "$(aws s3 ls s3://blindbucket-dev/ci/ | awk '{print $3}')" = "200000"
+
+          aws s3 sync tree s3://blindbucket-dev/ci/sync/
+          aws s3 sync s3://blindbucket-dev/ci/sync/ tree-back
+          diff -r tree tree-back
+
+          aws s3api get-object --bucket blindbucket-dev --key ci/payload.bin \
+            --range bytes=1000-1099 range.bin >/dev/null
+          test "$(stat -c%s range.bin)" = "100"
+
+          aws s3 rm s3://blindbucket-dev/ci/sync/ --recursive
+          aws s3 rm s3://blindbucket-dev/ci/payload.bin
+
+      - name: Gateway log on failure
+        if: failure()
+        run: |
+          cat gateway.log || true
+          docker logs minio || true
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-latest
