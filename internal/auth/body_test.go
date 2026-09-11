@@ -324,6 +324,53 @@ func TestChunkedSignatureChain(t *testing.T) {
 	})
 }
 
+// TestChunkedWithoutTrailerSection covers a body that ends immediately after the
+// final chunk, with no trailer block at all.
+//
+// STREAMING-AWS4-HMAC-SHA256-PAYLOAD has exactly that shape, and it is what the
+// MinIO client sends. The helper above always writes a terminating blank line,
+// so this case needs building by hand -- which is why the original decoder
+// rejected every mc upload until a real client was pointed at it.
+func TestChunkedWithoutTrailerSection(t *testing.T) {
+	t.Parallel()
+
+	res := chunkedResult(PayloadStreamingSigned)
+	payload := []byte("no trailer follows this")
+
+	var body bytes.Buffer
+	prev := res.Seed
+	timestamp := res.Time.UTC().Format(amzDateFormat)
+	scope := res.Authorization.Credential.Scope()
+
+	emit := func(data []byte) {
+		sum := sha256.Sum256(data)
+		sts := strings.Join([]string{
+			chunkPayloadAlgorithm, timestamp, scope, prev,
+			emptyStringSHA256, hex.EncodeToString(sum[:]),
+		}, "\n")
+		sig := Sign(res.SigningKey, sts)
+		prev = sig
+		fmt.Fprintf(&body, "%x;chunk-signature=%s\r\n", len(data), sig)
+		body.Write(data)
+		body.WriteString("\r\n")
+	}
+	emit(payload)
+	emit(nil)
+	// Deliberately nothing after the final chunk's CRLF.
+
+	br, _, err := NewBodyReader(chunkedRequest(t, body.Bytes(), int64(len(payload)), nil), res)
+	if err != nil {
+		t.Fatalf("NewBodyReader: %v", err)
+	}
+	got, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("a body with no trailer section was rejected: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("decoded %q, want %q", got, payload)
+	}
+}
+
 func TestChunkedRejectsMalformedFraming(t *testing.T) {
 	t.Parallel()
 

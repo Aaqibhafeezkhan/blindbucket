@@ -227,6 +227,13 @@ func (c *ChunkedReader) readTrailer() error {
 
 	for range maxTrailerLines {
 		line, err := c.readLine()
+		if errors.Is(err, io.EOF) {
+			// A body with no trailer section ends right after the final chunk's
+			// CRLF. STREAMING-AWS4-HMAC-SHA256-PAYLOAD is exactly that shape,
+			// and it is what the MinIO client sends -- treating the missing
+			// section as a malformed body rejected every mc upload.
+			break
+		}
 		if err != nil {
 			return err
 		}
@@ -329,7 +336,11 @@ func (c *ChunkedReader) find(name string) *expectation {
 func (c *ChunkedReader) readLine() (string, error) {
 	line, err := c.src.ReadString('\n')
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrMalformedChunkedBody, err)
+		// A final line without its newline is still a line; only an empty read
+		// means there was nothing there.
+		if !errors.Is(err, io.EOF) || line == "" {
+			return "", fmt.Errorf("%w: %w", ErrMalformedChunkedBody, err)
+		}
 	}
 	if len(line) > maxChunkHeaderLine {
 		return "", fmt.Errorf("%w: line of %d bytes exceeds the limit", ErrMalformedChunkedBody, len(line))

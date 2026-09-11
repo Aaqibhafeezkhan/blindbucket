@@ -151,10 +151,21 @@ var responseHeadersToStrip = []string{
 
 // copyResponseHeaders forwards the upstream's headers to the client, minus
 // blindbucket's own metadata and anything that describes the ciphertext.
+//
+// User metadata is emitted with a lower-case name, written straight into the
+// map so net/http does not canonicalise it back. S3 lower-cases metadata keys,
+// and SDKs surface them as sent: boto3 hands the caller
+// response["Metadata"]["origin"], so a canonicalised "X-Amz-Meta-Origin" would
+// arrive as "Origin" and quietly break every lookup. Found by running the real
+// boto3 against this gateway, which is what docs/COMPATIBILITY.md is for.
 func copyResponseHeaders(dst, src http.Header) {
 	for name, values := range src {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-amz-meta-"+metaPrefix) {
+			continue
+		}
+		if strings.HasPrefix(lower, "x-amz-meta-") {
+			dst[lower] = slicesClone(values)
 			continue
 		}
 		dst[name] = slicesClone(values)

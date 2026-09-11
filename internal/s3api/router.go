@@ -69,6 +69,18 @@ var bucketQueryOps = map[string]Operation{
 	"delete":   OpDeleteObjects,
 }
 
+// ignorableParams are query parameters that carry no meaning for the service.
+//
+// "x-id" is telemetry the AWS SDKs attach -- ?x-id=PutObject and friends --
+// naming the operation the SDK believes it is performing. Real S3 ignores it,
+// and rclone, which uses that SDK, sends it on every object request. Refusing it
+// as an unknown sub-resource made every rclone upload fail with a 501, which is
+// how this was found. It is still covered by the signature, because the
+// canonical query string is built from the request as it arrived.
+var ignorableParams = map[string]bool{
+	"x-id": true,
+}
+
 // listingParams are the query parameters that shape a listing rather than
 // selecting a different operation. They are forwarded to the provider
 // unchanged, so pagination, prefixes and delimiters behave exactly as a client
@@ -134,6 +146,9 @@ func routeBucket(r *http.Request, bucket string) (Request, *Error) {
 			}
 			continue
 		}
+		if ignorableParams[strings.ToLower(name)] {
+			continue
+		}
 		if !listingParams[name] {
 			return Request{Bucket: bucket, Op: OpUnsupported}, ErrNotImplemented.WithMessage(
 				"the bucket sub-resource %q is not implemented in this build", name)
@@ -175,15 +190,17 @@ func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 			"the %s prefix is reserved by the gateway", ReservedPrefix)
 	}
 
-	// A query parameter on an object request always selects a sub-resource --
+	// A query parameter on an object request normally selects a sub-resource --
 	// ?acl, ?tagging, ?uploads, ?partNumber, a presigned URL's X-Amz-* set. None
 	// of those are implemented here, and treating one as a plain object request
 	// would be worse than refusing it: ?uploads answered as a PUT would send
 	// plaintext to the provider.
-	if len(r.URL.Query()) > 0 {
+	for name := range r.URL.Query() {
+		if ignorableParams[strings.ToLower(name)] {
+			continue
+		}
 		return Request{Bucket: bucket, Key: key, Op: OpUnsupported},
-			ErrNotImplemented.WithMessage("the sub-resource %q is not implemented in this build",
-				firstQueryKey(r.URL.RawQuery))
+			ErrNotImplemented.WithMessage("the sub-resource %q is not implemented in this build", name)
 	}
 
 	op := objectOperation(r.Method)
@@ -253,15 +270,4 @@ func splitPath(path string) (bucket, key string) {
 	}
 	bucket, key, _ = strings.Cut(trimmed, "/")
 	return bucket, key
-}
-
-// firstQueryKey names the first query parameter, for an error message that says
-// what was actually refused.
-func firstQueryKey(rawQuery string) string {
-	first, _, _ := strings.Cut(rawQuery, "&")
-	name, _, _ := strings.Cut(first, "=")
-	if name == "" {
-		return rawQuery
-	}
-	return name
 }

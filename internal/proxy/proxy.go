@@ -142,8 +142,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // fail logs and renders an error response.
 func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, requestID string, req s3api.Request, apiErr *s3api.Error) {
+	// A 501 is a documented limit of this build, not a fault: logging it at
+	// error level would make an alert fire every time a client tries a feature
+	// that is simply not here yet.
 	level := slog.LevelWarn
-	if apiErr.HTTPStatus >= http.StatusInternalServerError {
+	if apiErr.HTTPStatus >= http.StatusInternalServerError &&
+		apiErr.HTTPStatus != http.StatusNotImplemented {
 		level = slog.LevelError
 	}
 	p.log.Log(r.Context(), level, "request failed",
