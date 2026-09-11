@@ -1,0 +1,63 @@
+name: Formal model
+
+# The model in spec/tla covers the manifest coordination (CONCEPT.md 10.8, 11.2),
+# not the Go code, so it runs when the model or the coordination logic changes
+# rather than on every push. MCFixed explores ~38.5 million states and is the
+# reason for the path filter.
+on:
+  push:
+    branches: [main]
+    # Duplicated below: GitHub Actions does not resolve YAML anchors.
+    paths:
+      - "spec/tla/**"
+      - "internal/manifest/**"
+      - "internal/proxy/**"
+      - ".github/workflows/tla.yml"
+  pull_request:
+    paths:
+      - "spec/tla/**"
+      - "internal/manifest/**"
+      - "internal/proxy/**"
+      - ".github/workflows/tla.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tla-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tlc:
+    name: TLC
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache tla2tools.jar
+        uses: actions/cache@v4
+        with:
+          path: .tools/tla2tools.jar
+          key: tla2tools-v1.7.4
+
+      - run: make tla-tools
+
+      # The PlusCal algorithm and its TLA+ translation both live in
+      # Multipart.tla. If they drift apart, TLC checks something other than the
+      # algorithm that is in the file, and nobody would notice.
+      - name: The PlusCal translation is up to date
+        run: |
+          make tla-translate
+          git diff --exit-code -- spec/tla/Multipart.tla
+
+      # Four of the five configurations are expected to produce a counterexample;
+      # check.sh fails if one of them does not.
+      - name: Check every configuration
+        run: make tla

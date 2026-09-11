@@ -15,6 +15,12 @@ coverage.*
 # Benchmark results
 /bench/results/
 
+# TLA+ tools, downloaded by `make tla-tools`. The model and its translation are
+# committed; the 2 MB jar is not.
+/.tools/
+/spec/tla/states/
+/spec/tla/*.old
+
 # Local configuration and anything key-shaped — never committed
 *.local.yaml
 *.local.yml

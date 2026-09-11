@@ -3,6 +3,10 @@ PKG     := ./...
 BIN     := bin/blindbucket
 FUZZTIME ?= 30s
 
+# TLA+ tools for the formal model in spec/tla (M3.5). The jar is not committed.
+TLA_VERSION ?= v1.7.4
+TLA_TOOLS   ?= .tools/tla2tools.jar
+
 .PHONY: all
 all: fmt lint test
 
@@ -49,6 +53,29 @@ fuzz:
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem $(PKG)
 
+# --- Formal model (spec/tla) -------------------------------------------------
+
+$(TLA_TOOLS):
+	@mkdir -p $(dir $@)
+	curl -sSLf -o $@ \
+	  https://github.com/tlaplus/tlaplus/releases/download/$(TLA_VERSION)/tla2tools.jar
+
+.PHONY: tla-tools
+tla-tools: $(TLA_TOOLS)
+
+# Regenerate the TLA+ translation of the PlusCal algorithm. Both live in
+# Multipart.tla and both are committed; CI fails if they drift apart.
+.PHONY: tla-translate
+tla-translate: $(TLA_TOOLS)
+	java -cp $(TLA_TOOLS) pcal.trans spec/tla/Multipart.tla
+	@rm -f spec/tla/Multipart.cfg spec/tla/Multipart.old
+
+# Run TLC over every configuration. Four of the five are expected to report a
+# counterexample; check.sh treats a missing one as a failure.
+.PHONY: tla
+tla: $(TLA_TOOLS)
+	TLA_TOOLS=$(abspath $(TLA_TOOLS)) ./spec/tla/check.sh
+
 .PHONY: vuln
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest $(PKG)
@@ -56,3 +83,4 @@ vuln:
 .PHONY: clean
 clean:
 	rm -rf bin dist coverage.out
+	rm -f spec/tla/*.old spec/tla/states

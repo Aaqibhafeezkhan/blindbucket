@@ -175,6 +175,7 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Which clients work, which settings they need, and what does not work yet. Measured, not assumed. |
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
+| [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
 ## Roadmap
@@ -185,17 +186,63 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | **done** |
 | M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | **done** |
 | M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | **done** |
-| M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | next |
+| M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
 | — | Independent Python reference decoder, differential fuzzing | optional |
 | M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics, benchmarks | planned |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
-Concept version 0.2 found two race conditions in the original manifest lifecycle, both
-ending in a visible multipart object with no manifest — readable by nobody. The fix is a set
-of rules derived by reasoning, which is exactly the kind of argument that tends to be wrong.
-M3.5 exists to check them with a model checker before M4 turns them into code, and the same
-model must reproduce the original bug as a negative test.
+M4 is where the project becomes worth showing: multipart is what "works with real S3
+clients" actually means. M3.5 exists to get the coordination rules right before that code
+exists — see below.
+
+## A race in my own design, and the machine that found it
+
+Version 0.2 of the concept found two race conditions in version 0.1's manifest lifecycle.
+Both end the same way: a multipart object that is visible but has no manifest. The data is
+still there and still decryptable, but the proxy refuses to serve an object it cannot verify
+as whole, so every `GetObject` fails. Neither bug lives in a single request — both need two
+requests interleaved a particular way, on two instances that never learn of each other.
+
+The fix was four rules, derived by reasoning. So was the bug. Before M4 turns those rules
+into Go, [`spec/tla/Multipart.tla`](spec/tla/Multipart.tla) turns them into a model that TLC
+checks exhaustively: three concurrent uploads, a single-part PUT, a delete, a rotation and a
+`gc` pass on one key, with a crash possible after every step. 38.5 million distinct states,
+no counterexample.
+
+Four more configurations put flawed rules back and *require* a counterexample — a model that
+cannot find the bugs already known is not evidence about the ones that are not. Here is the
+original `gc` bug, from the trace TLC produces, with the incidental steps of uninvolved
+processes left out:
+
+```
+1  client  PutObject                              a single-part object is visible
+2  u1      CreateMultipartUpload, HEAD            upload open; current manifest id: none
+3  u1      write manifest u1                      manifests: {u1}
+4  gc      list manifests                         listed: {u1}
+5  gc      HEAD — the object is single-part       current: none
+6  gc      delete listed manifests that are not   manifests: {}   ← u1 is gone
+           the current one
+7  u1      CompleteMultipartUpload                visible: multipart u1, manifest missing
+```
+
+Every fact `gc` observed was true. `u1` really was not the current manifest id at step 5 — it
+just was not current *yet*.
+
+The result that paid for the milestone was not one of the two known bugs. Rule R4 fixes an
+order for two `gc` steps that both only *read*, and swapping them is the kind of edit that
+passes review precisely because neither changes anything. TLC produces an unreadable object in
+twelve states: check for open uploads first, find none, then list, and the listing picks up a
+manifest written after the check. Listing first is what gives the check its meaning.
+
+That configuration is now a regression test. Each counterexample is also written out as a
+scenario for M4's integration tests — [spec/tla/README.md](spec/tla/README.md) has all four,
+and [ADR-010](docs/adr/ADR-010-manifest-lifecycle-under-concurrency.md) records what the model
+does and does not cover.
+
+```sh
+make tla        # all five configurations; four must fail, one must not
+```
 
 ## Development
 
@@ -208,6 +255,7 @@ make lint           # golangci-lint
 make fuzz           # 30s per fuzz target
 make bench          # micro-benchmarks
 make vuln           # govulncheck
+make tla            # model-check spec/tla (needs a JRE; downloads tla2tools.jar)
 
 docker compose up -d   # local MinIO on :9002, console on :9091
 ```
@@ -222,8 +270,9 @@ BLINDBUCKET_TEST_S3_ENDPOINT=http://localhost:9002 go test ./internal/upstream .
 python3 test/integration/clients/boto3/scenarios.py
 ```
 
-Production code is Go, without exception. Anything else in this repository has a written
-reason in [ADR-011](docs/adr/ADR-011-languages-outside-the-go-core.md).
+Production code is Go, without exception. Anything else in this repository — the Python
+client tests, the TLA+ model — has a written reason in
+[ADR-011](docs/adr/ADR-011-languages-outside-the-go-core.md).
 
 ## Reviews welcome
 
