@@ -1,7 +1,8 @@
-# Build output
+# Build output. The binary name must be anchored to the repository root: an
+# unanchored "blindbucket" would also match the cmd/blindbucket/ source directory.
 /bin/
 /dist/
-blindbucket
+/blindbucket
 
 # Test and coverage artifacts
 *.test
