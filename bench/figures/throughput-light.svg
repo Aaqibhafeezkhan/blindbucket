@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="772" height="660" viewBox="0 0 772 660" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" role="img">
+<rect width="772" height="660" fill="#fcfcfb"/>
+<text x="58.0" y="34.0" font-size="15" fill="#0b0b0b" text-anchor="start" font-weight="600">Throughput: direct to the provider vs through the gateway</text>
+<text x="58.0" y="54.0" font-size="11" fill="#52514e" text-anchor="start" font-weight="normal">MiB/s for 10 MiB objects, objects/s for 1 KiB objects. Higher is better.</text>
+<rect x="58.0" y="72.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="73.0" y="80.0" font-size="11" fill="#52514e" text-anchor="start" font-weight="normal">Direct to the provider</text>
+<rect x="225.2" y="72.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="240.2" y="80.0" font-size="11" fill="#52514e" text-anchor="start" font-weight="normal">Through the gateway</text>
+<text x="58.0" y="104.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">1KiB objects, GET (obj/s)</text>
+<line x1="58.0" y1="306.0" x2="358.0" y2="306.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="310.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">0</text>
+<line x1="58.0" y1="258.5" x2="358.0" y2="258.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="262.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">2,000</text>
+<line x1="58.0" y1="211.0" x2="358.0" y2="211.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="215.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">4,000</text>
+<line x1="58.0" y1="163.5" x2="358.0" y2="163.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="167.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">6,000</text>
+<line x1="58.0" y1="116.0" x2="358.0" y2="116.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="120.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">8,000</text>
+<line x1="58.0" y1="306.0" x2="358.0" y2="306.0" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M73.0,306.0 L73.0,273.7 Q73.0,269.7 77.0,269.7 L103.0,269.7 Q107.0,269.7 107.0,273.7 L107.0,306.0 Z" fill="#2a78d6"/>
+<text x="90.0" y="263.7" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">1,526</text>
+<path d="M109.0,306.0 L109.0,281.5 Q109.0,277.5 113.0,277.5 L139.0,277.5 Q143.0,277.5 143.0,281.5 L143.0,306.0 Z" fill="#eb6834"/>
+<text x="126.0" y="271.5" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">1,202</text>
+<text x="108.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1</text>
+<path d="M173.0,306.0 L173.0,159.9 Q173.0,155.9 177.0,155.9 L203.0,155.9 Q207.0,155.9 207.0,159.9 L207.0,306.0 Z" fill="#2a78d6"/>
+<text x="190.0" y="149.9" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">6,321</text>
+<path d="M209.0,306.0 L209.0,182.9 Q209.0,178.9 213.0,178.9 L239.0,178.9 Q243.0,178.9 243.0,182.9 L243.0,306.0 Z" fill="#eb6834"/>
+<text x="226.0" y="172.9" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">5,353</text>
+<text x="208.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">16</text>
+<path d="M273.0,306.0 L273.0,162.7 Q273.0,158.7 277.0,158.7 L303.0,158.7 Q307.0,158.7 307.0,162.7 L307.0,306.0 Z" fill="#2a78d6"/>
+<text x="290.0" y="152.7" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">6,200</text>
+<path d="M309.0,306.0 L309.0,173.8 Q309.0,169.8 313.0,169.8 L339.0,169.8 Q343.0,169.8 343.0,173.8 L343.0,306.0 Z" fill="#eb6834"/>
+<text x="326.0" y="163.8" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">5,734</text>
+<text x="308.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">64</text>
+<text x="208.0" y="340.0" font-size="10" fill="#898781" text-anchor="middle" font-weight="normal">concurrent clients</text>
+<text x="414.0" y="104.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">1KiB objects, PUT (obj/s)</text>
+<line x1="414.0" y1="306.0" x2="714.0" y2="306.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="310.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">0</text>
+<line x1="414.0" y1="258.5" x2="714.0" y2="258.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="262.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">750</text>
+<line x1="414.0" y1="211.0" x2="714.0" y2="211.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="215.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">1,500</text>
+<line x1="414.0" y1="163.5" x2="714.0" y2="163.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="167.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">2,250</text>
+<line x1="414.0" y1="116.0" x2="714.0" y2="116.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="120.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">3,000</text>
+<line x1="414.0" y1="306.0" x2="714.0" y2="306.0" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M429.0,306.0 L429.0,252.3 Q429.0,248.3 433.0,248.3 L459.0,248.3 Q463.0,248.3 463.0,252.3 L463.0,306.0 Z" fill="#2a78d6"/>
+<text x="446.0" y="242.3" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">911</text>
+<path d="M465.0,306.0 L465.0,269.7 Q465.0,265.7 469.0,265.7 L495.0,265.7 Q499.0,265.7 499.0,269.7 L499.0,306.0 Z" fill="#eb6834"/>
+<text x="482.0" y="259.7" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">637</text>
+<text x="464.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1</text>
+<path d="M529.0,306.0 L529.0,135.2 Q529.0,131.2 533.0,131.2 L559.0,131.2 Q563.0,131.2 563.0,135.2 L563.0,306.0 Z" fill="#2a78d6"/>
+<text x="546.0" y="125.2" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">2,759</text>
+<path d="M565.0,306.0 L565.0,161.2 Q565.0,157.2 569.0,157.2 L595.0,157.2 Q599.0,157.2 599.0,161.2 L599.0,306.0 Z" fill="#eb6834"/>
+<text x="582.0" y="151.2" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">2,350</text>
+<text x="564.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">16</text>
+<path d="M629.0,306.0 L629.0,141.0 Q629.0,137.0 633.0,137.0 L659.0,137.0 Q663.0,137.0 663.0,141.0 L663.0,306.0 Z" fill="#2a78d6"/>
+<text x="646.0" y="131.0" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">2,669</text>
+<path d="M665.0,306.0 L665.0,160.1 Q665.0,156.1 669.0,156.1 L695.0,156.1 Q699.0,156.1 699.0,160.1 L699.0,306.0 Z" fill="#eb6834"/>
+<text x="682.0" y="150.1" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">2,367</text>
+<text x="664.0" y="322.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">64</text>
+<text x="564.0" y="340.0" font-size="10" fill="#898781" text-anchor="middle" font-weight="normal">concurrent clients</text>
+<text x="58.0" y="368.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">10MiB objects, GET (MiB/s)</text>
+<line x1="58.0" y1="570.0" x2="358.0" y2="570.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="574.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">0</text>
+<line x1="58.0" y1="522.5" x2="358.0" y2="522.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="526.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">75</text>
+<line x1="58.0" y1="475.0" x2="358.0" y2="475.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="479.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">150</text>
+<line x1="58.0" y1="427.5" x2="358.0" y2="427.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="431.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">225</text>
+<line x1="58.0" y1="380.0" x2="358.0" y2="380.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="50.0" y="384.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">300</text>
+<line x1="58.0" y1="570.0" x2="358.0" y2="570.0" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M73.0,570.0 L73.0,397.6 Q73.0,393.6 77.0,393.6 L103.0,393.6 Q107.0,393.6 107.0,397.6 L107.0,570.0 Z" fill="#2a78d6"/>
+<text x="90.0" y="387.6" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">278</text>
+<path d="M109.0,570.0 L109.0,404.3 Q109.0,400.3 113.0,400.3 L139.0,400.3 Q143.0,400.3 143.0,404.3 L143.0,570.0 Z" fill="#eb6834"/>
+<text x="126.0" y="394.3" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">268</text>
+<text x="108.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1</text>
+<path d="M173.0,570.0 L173.0,407.4 Q173.0,403.4 177.0,403.4 L203.0,403.4 Q207.0,403.4 207.0,407.4 L207.0,570.0 Z" fill="#2a78d6"/>
+<text x="190.0" y="397.4" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">263</text>
+<path d="M209.0,570.0 L209.0,420.7 Q209.0,416.7 213.0,416.7 L239.0,416.7 Q243.0,416.7 243.0,420.7 L243.0,570.0 Z" fill="#eb6834"/>
+<text x="226.0" y="410.7" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">242</text>
+<text x="208.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">16</text>
+<path d="M273.0,570.0 L273.0,417.4 Q273.0,413.4 277.0,413.4 L303.0,413.4 Q307.0,413.4 307.0,417.4 L307.0,570.0 Z" fill="#2a78d6"/>
+<text x="290.0" y="407.4" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">247</text>
+<path d="M309.0,570.0 L309.0,425.5 Q309.0,421.5 313.0,421.5 L339.0,421.5 Q343.0,421.5 343.0,425.5 L343.0,570.0 Z" fill="#eb6834"/>
+<text x="326.0" y="415.5" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">234</text>
+<text x="308.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">64</text>
+<text x="208.0" y="604.0" font-size="10" fill="#898781" text-anchor="middle" font-weight="normal">concurrent clients</text>
+<text x="414.0" y="368.0" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">10MiB objects, PUT (MiB/s)</text>
+<line x1="414.0" y1="570.0" x2="714.0" y2="570.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="574.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">0</text>
+<line x1="414.0" y1="522.5" x2="714.0" y2="522.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="526.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">75</text>
+<line x1="414.0" y1="475.0" x2="714.0" y2="475.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="479.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">150</text>
+<line x1="414.0" y1="427.5" x2="714.0" y2="427.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="431.5" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">225</text>
+<line x1="414.0" y1="380.0" x2="714.0" y2="380.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="406.0" y="384.0" font-size="10" fill="#898781" text-anchor="end" font-weight="normal">300</text>
+<line x1="414.0" y1="570.0" x2="714.0" y2="570.0" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M429.0,570.0 L429.0,441.9 Q429.0,437.9 433.0,437.9 L459.0,437.9 Q463.0,437.9 463.0,441.9 L463.0,570.0 Z" fill="#2a78d6"/>
+<text x="446.0" y="431.9" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">209</text>
+<path d="M465.0,570.0 L465.0,446.0 Q465.0,442.0 469.0,442.0 L495.0,442.0 Q499.0,442.0 499.0,446.0 L499.0,570.0 Z" fill="#eb6834"/>
+<text x="482.0" y="436.0" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">202</text>
+<text x="464.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">1</text>
+<path d="M529.0,570.0 L529.0,413.6 Q529.0,409.6 533.0,409.6 L559.0,409.6 Q563.0,409.6 563.0,413.6 L563.0,570.0 Z" fill="#2a78d6"/>
+<text x="546.0" y="403.6" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">253</text>
+<path d="M565.0,570.0 L565.0,421.4 Q565.0,417.4 569.0,417.4 L595.0,417.4 Q599.0,417.4 599.0,421.4 L599.0,570.0 Z" fill="#eb6834"/>
+<text x="582.0" y="411.4" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">241</text>
+<text x="564.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">16</text>
+<path d="M629.0,570.0 L629.0,436.0 Q629.0,432.0 633.0,432.0 L659.0,432.0 Q663.0,432.0 663.0,436.0 L663.0,570.0 Z" fill="#2a78d6"/>
+<text x="646.0" y="426.0" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">218</text>
+<path d="M665.0,570.0 L665.0,549.0 Q665.0,545.0 669.0,545.0 L695.0,545.0 Q699.0,545.0 699.0,549.0 L699.0,570.0 Z" fill="#eb6834"/>
+<text x="682.0" y="539.0" font-size="9" fill="#52514e" text-anchor="middle" font-weight="normal">39</text>
+<text x="664.0" y="586.0" font-size="11" fill="#52514e" text-anchor="middle" font-weight="normal">64</text>
+<text x="564.0" y="604.0" font-size="10" fill="#898781" text-anchor="middle" font-weight="normal">concurrent clients</text>
+</svg>

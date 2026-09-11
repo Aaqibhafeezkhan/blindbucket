@@ -75,6 +75,51 @@ jobs:
       # each. Seed corpora under testdata/ are exercised by `go test` regardless.
       - run: make fuzz FUZZTIME=30s
 
+  # CONCEPT.md 12.5 asks for micro-benchmarks in CI reporting regressions via
+  # benchstat. Reporting, not failing: a shared runner's throughput varies by
+  # more than most real regressions, so a hard threshold would either cry wolf
+  # every week or be set so loose it catches nothing. The comparison goes in the
+  # job summary, where a reviewer sees it next to the diff that caused it.
+  bench:
+    name: Micro-benchmarks (benchstat)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Benchmark the base
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          go test ./internal/crypto/stream -run '^$' -bench . -benchmem \
+            -count=6 -benchtime=200x > /tmp/base.txt
+
+      - name: Benchmark the change
+        run: |
+          git checkout --quiet ${{ github.sha }}
+          go test ./internal/crypto/stream -run '^$' -bench . -benchmem \
+            -count=6 -benchtime=200x > /tmp/head.txt
+
+      - name: Compare
+        run: |
+          go run golang.org/x/perf/cmd/benchstat@latest /tmp/base.txt /tmp/head.txt \
+            | tee /tmp/benchstat.txt
+          {
+            echo "## Micro-benchmarks"
+            echo
+            echo "Base \`${{ github.event.pull_request.base.sha }}\` against this branch."
+            echo "Shared runners are noisy; read the p-values, not the percentages."
+            echo
+            echo '```'
+            cat /tmp/benchstat.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   integration:
     name: Integration (MinIO)
     runs-on: ubuntu-latest

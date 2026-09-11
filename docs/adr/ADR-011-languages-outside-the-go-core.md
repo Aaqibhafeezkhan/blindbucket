@@ -41,11 +41,19 @@ of these holds:
 | boto3 compatibility tests | Python | 1 | `test/integration/clients/boto3/` | M3 |
 | Model of manifest and rotation coordination | TLA+ (PlusCal), TLC | 3 | `spec/tla/` | M3.5 |
 | Independent reference decoder, differential fuzzing | Python (`cryptography`) | 2 | `ref/python/` | after M4, optional |
-| Benchmark plots | Python (matplotlib) | convenience | `bench/plot/` | M5, optional |
+| Benchmark plots and summaries | Python (standard library only) | 1 | `bench/plot/` | M5 |
 | Machine-readable format description | Kaitai Struct | 3 | `docs/format.ksy` | M6, optional |
 
 Makefiles, Dockerfiles, Compose files, GitHub Actions and deployment examples are
 configuration, not a language choice.
+
+**One row changed when it was built.** The benchmark plots were planned as Python with
+matplotlib, under a fifth reason this ADR does not actually grant: convenience. When the
+figures were written it turned out that two charts are a few hundred lines of SVG, so they
+are emitted by the standard library alone. The criterion becomes 1 rather than an exception:
+the same Python the boto3 tests already require, with nothing to install and no version to
+pin, which is the argument the rest of the project makes about dependencies. A third chart
+form, or anything wanting statistics, would be the point to revisit it -- and to say so here.
 
 ## Alternatives considered
 

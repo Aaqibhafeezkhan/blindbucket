@@ -141,8 +141,12 @@ first: the format can be reviewed, fuzzed and measured before any HTTP is involv
 
 ## Numbers
 
-Measured on an Apple M4 with Go 1.27.1. Reproduce with `make bench`; the scripts
-and the caveats are in [bench/](bench/).
+Measured on an Apple M4 (10 cores, 16 GiB) with Go 1.27.1, against MinIO in a
+local VM — client, gateway and provider all on the one laptop, competing for the
+same cores and the same disk. Absolute figures would be higher on real hardware;
+the comparisons are what the setup is built to measure. Reproduce with
+`make bench` and [bench/warp.sh](bench/warp.sh); the scripts and the caveats are
+in [bench/](bench/).
 
 | Measurement | Result |
 |---|---|
@@ -151,8 +155,11 @@ and the caveats are in [bench/](bench/).
 | Allocations per chunk, steady state | **0** |
 | Allocations per 8 MiB stream | 22 encrypting, 26 decrypting — constant, not per chunk |
 | 10 GiB encrypt + decrypt | identical SHA-256, **0.5 MiB peak Go heap** |
-| 5 GiB through the gateway to MinIO | identical SHA-256, **12 MiB resident** while streaming |
+| 5 GiB through the gateway, one stream | identical SHA-256, **12 MiB resident** while streaming |
 | 5 GiB multipart, 640 parts, two instances | identical SHA-256, **56 MiB peak resident** per instance |
+| 10 GiB through the gateway, 10 parts in flight | identical SHA-256, **82 MiB peak resident**, 23 MiB idle |
+| 10 MiB objects through the gateway vs direct | 92–97 % of the provider's own throughput |
+| 1 KiB objects through the gateway vs direct | 70 % at one client, 89–92 % at 64 — about +0.5 ms per request |
 
 ## Clients
 
@@ -180,10 +187,46 @@ third — user metadata was arriving with Go's canonical header casing, so
 
 The allocation figures are the interesting ones. They do not change with the
 number of chunks, which is the whole of goal G3: memory is a function of how many
-streams are in flight, never of how large they are. AES-GCM runs well ahead of any
-network the proxy will sit behind, so the expected bottleneck is the upstream, not
-the cipher — an expectation M5 will confirm or refute with `warp` rather than
-assert.
+streams are in flight, never of how large they are.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/figures/memory-dark.svg">
+  <img alt="Gateway resident set while 10 GiB streams through it: about 22 MiB idle, peaking at 82 MiB during the upload and settling back to 23 MiB during the download" src="bench/figures/memory-light.svg">
+</picture>
+
+Read that figure with two caveats. The upload is `aws s3 cp`, which splits 10 GiB
+into 1280 parts and keeps ten in flight, so the peak covers ten concurrent
+streams and not one. And on macOS the resident set does not fall when Go releases
+pages, which makes every number on that curve an upper bound — the download half
+is flat at 23 MiB because it never had to rise, not because the upload's memory
+was reclaimed. The portable per-stream evidence is the Go-heap measurement in the
+table above, which watches the heap rather than asking the operating system.
+
+AES-GCM was expected to run well ahead of any network the proxy sits behind, so
+the bottleneck should be the upstream and not the cipher. `warp` now says so
+rather than the expectation standing on its own: against MinIO on the same
+machine, 10 MiB objects move at 92–97 % of what the provider manages without the
+gateway in the way.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/figures/throughput-dark.svg">
+  <img alt="Throughput comparison across object sizes and concurrency: the gateway tracks the provider closely except for 10 MiB PUTs at 64 concurrent clients" src="bench/figures/throughput-light.svg">
+</picture>
+
+Small objects are where a proxy costs something, and it costs about half a
+millisecond per request: 1 KiB uploads run at 70 % of direct with a single
+client, rising to 89 % at 64 as that fixed cost amortises across concurrency. At
+64 clients the p99 is identical to the provider's own, because by then the tail
+belongs to the provider rather than to the gateway.
+
+**One cell does not fit that picture**, and it is left standing rather than
+dropped: 10 MiB PUTs at 64 concurrent clients run at 18 % of direct. It
+reproduces across all three repetitions, it is specific to PUT — GET at the same
+load is at 95 % — and the gateway process is idle while it happens, so it is
+waiting on something rather than working. The cause is not identified yet.
+[bench/figures/results.md](bench/figures/results.md) has the full table, the
+hypothesis that did not survive its own repeat measurement, and what would settle
+it.
 
 One honest asterisk: the CLI's peak resident memory is about 70 MiB, essentially
 all of it the 64 MiB Argon2id arena used once to unlock the keyring. That is a
@@ -214,7 +257,8 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | optional |
-| M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics, benchmarks | planned |
+| M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics | planned |
+| — | Benchmarks: micro, memory, `warp` macro comparison, figures | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3

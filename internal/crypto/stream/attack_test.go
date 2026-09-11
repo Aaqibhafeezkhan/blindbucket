@@ -87,8 +87,13 @@ func TestAttackHeaderFields(t *testing.T) {
 // until the first chunk verifies, so a claim of 2^30-byte chunks must be rejected
 // before any buffer is sized from it.
 func TestAttackOversizedChunkSizeAllocatesNothing(t *testing.T) {
-	t.Parallel()
-
+	// Deliberately not t.Parallel(): the budget is checked against
+	// runtime.MemStats, which counts allocations for the whole process. A
+	// parallel sibling allocating at the same time is charged to this test and
+	// fails it for no reason -- which is exactly what happened while the machine
+	// was busy running benchmarks. Go defers parallel tests until the sequential
+	// ones finish, so staying sequential is what makes the measurement mean
+	// anything.
 	_, sealed := attackSegment(t)
 	tampered := bytes.Clone(sealed)
 	tampered[offLog2C] = 30 // 1 GiB chunks
