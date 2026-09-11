@@ -1,7 +1,11 @@
 # blindbucket Wire Format — Version 1
 
-**Status:** Draft, normative for format version `1`.
-**Last updated:** 2026-09-11 (M0)
+**Status:** Normative for format version `1`, and implemented as specified.
+**Last updated:** 2026-09-11 (M1)
+
+Sections 4 through 9 are implemented in `internal/crypto/stream`,
+`internal/crypto/keys` and `internal/crypto/envelope`, and are pinned by the
+known-answer vectors of section 12. Section 10 is still design-only.
 
 This document is the authoritative specification of the bytes blindbucket writes to
 object storage. It is written so that an independent implementation can interoperate

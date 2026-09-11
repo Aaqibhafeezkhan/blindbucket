@@ -1,6 +1,12 @@
 # Threat Model
 
-**Status:** Draft (M0). Revised at every milestone that adds an attack surface.
+**Status:** Current as of M1. Revised at every milestone that adds an attack surface.
+
+The guarantees below that concern the segment format itself -- chunk integrity,
+ordering, truncation detection, binding to bucket and key -- are implemented and
+covered by the attack tests listed in section 7. Everything involving HTTP, client
+authentication or multipart objects is still design-only and is marked as such in
+the roadmap, not here.
 **Last updated:** 2026-09-11
 
 This document states precisely what blindbucket protects against and what it does not.

@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# GOTOOLCHAIN=local forbids Go from silently downloading a newer toolchain, so a
+# job that says it builds on the declared floor really does. Jobs that run a
+# tool rather than the project override the Go version instead.
 env:
   GOTOOLCHAIN: local
 
@@ -23,24 +26,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
       - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v6
+      # v8 of the action is the one that speaks golangci-lint v2; earlier
+      # versions install a v1 binary, which rejects this repository's config.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.13.2
 
-  test:
-    name: Test (race)
+  tidy:
+    name: go.mod is tidy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Verify go.mod is tidy
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
+      - run: go mod tidy
+      - name: Fail if go.mod or go.sum changed
+        run: git diff --exit-code -- go.mod go.sum
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # "1.24" is the declared floor: crypto/hkdf arrived there, and the
+        # dependencies are pinned to releases that still build with it.
+        go: ["1.24", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
       - run: go build ./...
       - run: go test -race -count=1 ./...
 
@@ -52,8 +71,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # Short runs on every push; long runs happen nightly. Seed corpora in
-      # testdata/ are exercised by `go test` regardless.
+      # Short runs on every push; the nightly workflow runs them for 15 minutes
+      # each. Seed corpora under testdata/ are exercised by `go test` regardless.
       - run: make fuzz FUZZTIME=30s
 
   vuln:
@@ -61,7 +80,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # govulncheck itself requires a newer Go than this module's floor, so this
+      # job builds the tool with current Go. It still analyses the module as
+      # declared.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
