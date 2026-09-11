@@ -1,0 +1,77 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+
+	"golang.org/x/term"
+)
+
+// passphraseEnv names the environment variable a passphrase may be supplied in.
+// CONCEPT.md section 13.1 requires that secrets are referenced through the
+// environment or a file, never written into configuration.
+const passphraseEnv = "BLINDBUCKET_PASSPHRASE"
+
+// passphraseFlags are the ways a command can be told where to find the
+// passphrase that protects a keyring.
+type passphraseFlags struct {
+	file string
+}
+
+func (p *passphraseFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&p.file, "passphrase-file", "",
+		"read the keyring passphrase from this file (default: $"+passphraseEnv+", else prompt)")
+}
+
+// resolve returns the passphrase, asking the terminal only as a last resort.
+//
+// confirm re-prompts for verification, which matters when the passphrase is
+// about to protect newly generated keys: a typo there is unrecoverable.
+func (p *passphraseFlags) resolve(prompt string, confirm bool) ([]byte, error) {
+	if p.file != "" {
+		data, err := os.ReadFile(p.file)
+		if err != nil {
+			return nil, fmt.Errorf("reading the passphrase file: %w", err)
+		}
+		pass := bytes.TrimRight(data, "\r\n")
+		if len(pass) == 0 {
+			return nil, fmt.Errorf("the passphrase file %s is empty", p.file)
+		}
+		return pass, nil
+	}
+
+	if env := os.Getenv(passphraseEnv); env != "" {
+		return []byte(env), nil
+	}
+
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return nil, fmt.Errorf("no passphrase available: set $%s, pass --passphrase-file, or run on a terminal", passphraseEnv)
+	}
+
+	fmt.Fprint(os.Stderr, prompt)
+	pass, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	if len(pass) == 0 {
+		return nil, errors.New("passphrase must not be empty")
+	}
+
+	if confirm {
+		fmt.Fprint(os.Stderr, "Repeat passphrase: ")
+		again, err := term.ReadPassword(fd)
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(pass, again) {
+			return nil, errors.New("the two passphrases do not match")
+		}
+	}
+	return pass, nil
+}
