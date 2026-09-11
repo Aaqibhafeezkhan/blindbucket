@@ -8,6 +8,7 @@ rejected options is not a decision, it is a default.
 |---|---|---|---|
 | [001](ADR-001-segment-format.md) | Segment format: STREAM with AES-256-GCM, 64 KiB chunks, authenticated header | Accepted | M0 |
 | [002](ADR-002-key-hierarchy.md) | Key hierarchy: external root key, in-memory KEK ring, one DEK per object | Accepted | M0 |
+| [011](ADR-011-languages-outside-the-go-core.md) | Languages and tools outside the Go core | Accepted | M0 |
 
 ## Planned
 
@@ -16,7 +17,12 @@ rejected options is not a decision, it is a default.
 | 003 | Custom upstream client on `net/http` instead of the SDK S3 client | M2 |
 | 004 | Fail-closed by connection abort after response headers are sent | M2 |
 | 005 | Checksums: verify locally, do not forward, withhold the final chunk | M3 |
+| 010 | Manifest lifecycle under concurrency (R1–R4, checked with TLA+) | M3.5 |
 | 006 | Statelessness via an encrypted upload token | M4 |
 | 007 | Manifest as a sidecar object, manifest id in object metadata | M4 |
 | 008 | Part sizes as multiples of the chunk size | M4 |
-| 009 | Rotation by copy, preserving part structure | M5 |
+| 009 | Rotation by copy, preserving part structure, with conditional writes | M5 |
+
+ADR numbers reflect the order the decisions were identified, not the order they are made.
+010 and 011 were added in concept version 0.2; 011 is decided in M0 because it governs what
+may enter the repository from the start, while 010 waits for the model checker in M3.5.

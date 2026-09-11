@@ -77,13 +77,21 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| M0 | Repo, CI, format specification, threat model, ADR-001/002 | **done** |
+| M0 | Repo, CI, format specification, threat model, ADR-001/002/011 | **done** |
 | M1 | Crypto core (segment encoder/decoder), file keyring, `keygen`/`encrypt`/`decrypt` | next |
 | M2 | Local proxy: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject` | planned |
 | M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | planned |
+| M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | planned |
 | M4 | Multipart uploads: upload token, manifest, multi-instance operation | planned |
+| — | Independent Python reference decoder, differential fuzzing | optional |
 | M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics, benchmarks | planned |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
+
+Concept version 0.2 found two race conditions in the original manifest lifecycle, both
+ending in a visible multipart object with no manifest — readable by nobody. The fix is a set
+of rules derived by reasoning, which is exactly the kind of argument that tends to be wrong.
+M3.5 exists to check them with a model checker before M4 turns them into code, and the same
+model must reproduce the original bug as a negative test.
 
 ## Development
 
@@ -99,6 +107,9 @@ make vuln           # govulncheck
 
 docker compose up -d   # local MinIO on :9002, console on :9091
 ```
+
+Production code is Go, without exception. Anything else in this repository has a written
+reason in [ADR-011](docs/adr/ADR-011-languages-outside-the-go-core.md).
 
 ## Reviews welcome
 
