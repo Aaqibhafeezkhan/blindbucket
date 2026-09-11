@@ -28,6 +28,7 @@ type command struct {
 
 func commands() []command {
 	return []command{
+		{"serve", "run the S3 gateway", runServe},
 		{"keygen", "create a keyring, or add a key to an existing one", runKeygen},
 		{"encrypt", "encrypt a stream into a blindbucket file", runEncrypt},
 		{"decrypt", "decrypt a blindbucket file", runDecrypt},
@@ -100,7 +101,6 @@ func usage(w *os.File) {
 		_, _ = fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
 	}
 	_, _ = fmt.Fprintf(w, "\nPlanned (see CONCEPT.md):\n")
-	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "serve", "run the proxy (M2)")
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "inspect", "show an object's format details without decrypting (M4)")
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "rotate", "re-wrap data keys under a new KEK (M5)")
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "gc", "remove orphaned multipart manifests (M4)")

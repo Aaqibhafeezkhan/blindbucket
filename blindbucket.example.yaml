@@ -1,0 +1,29 @@
+# blindbucket configuration.
+#
+# Secrets are referenced, never written here: ${VAR} is resolved from the
+# environment at startup, and a missing variable is a startup error rather than
+# an empty credential.
+
+server:
+  # Loopback by default. Between client and proxy the body is plaintext, so a
+  # public listener without TLS would undo the point of the gateway.
+  listen: "127.0.0.1:9000"
+  # tls:
+  #   cert_file: /etc/blindbucket/tls.crt
+  #   key_file: /etc/blindbucket/tls.key
+
+upstream:
+  endpoint: http://localhost:9002        # the MinIO from docker-compose.yml
+  region: us-east-1                      # "auto" for Cloudflare R2
+  path_style: true
+  access_key_id: ${UPSTREAM_ACCESS_KEY_ID}
+  secret_access_key: ${UPSTREAM_SECRET_ACCESS_KEY}
+
+keys:
+  provider: file                         # vault and awskms arrive with M5
+  keyring: keyring.json
+  # passphrase_file: /run/secrets/keyring-passphrase
+  # Otherwise the passphrase comes from $BLINDBUCKET_PASSPHRASE.
+
+crypto:
+  log2_chunk_size: 16                    # 64 KiB
