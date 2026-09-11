@@ -1,0 +1,79 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  fuzz:
+    name: Long fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ./internal/crypto/stream
+          - ./internal/crypto/keys
+          - ./internal/crypto/envelope
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fuzz every target in ${{ matrix.package }}
+        run: |
+          for target in $(go test -list 'Fuzz.*' ${{ matrix.package }} | grep '^Fuzz'); do
+            echo "==> $target"
+            go test ${{ matrix.package }} -run '^$' -fuzz "^$target$" -fuzztime=15m
+          done
+      - name: Upload any failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ strategy.job-index }}
+          path: testdata/fuzz/
+
+  memory:
+    name: 10 GiB memory proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The M1 definition of done: 10 GiB encrypted and decrypted with an
+      # identical SHA-256, at a heap that does not grow with the object.
+      - run: BLINDBUCKET_STREAM_SIZE=10GiB go test ./internal/crypto/stream -run TestLargeStreamRoundTrip -v -timeout 40m
+
+  rss:
+    name: CLI resident memory
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make build
+      # RSS is only meaningful on Linux: see bench/README.md for why the macOS
+      # figure is not.
+      - name: Measure RSS over a 2 GiB stream
+        env:
+          BLINDBUCKET_PASSPHRASE: nightly-ci-passphrase-not-a-secret
+        run: |
+          ./bin/blindbucket keygen --out keyring.json
+          head -c 2147483648 /dev/urandom > big.bin
+          bench/rss-sample.sh rss.csv ./bin/blindbucket encrypt --keyring keyring.json -i big.bin -o big.bb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rss-samples
+          path: rss.csv
