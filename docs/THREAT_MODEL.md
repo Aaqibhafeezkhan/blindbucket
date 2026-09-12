@@ -1,8 +1,8 @@
 # Threat Model
 
-**Status:** Current as of `v0.1.0` plus server-side copy
-([ADR-012](adr/ADR-012-copy-semantics.md)) and the Vault and KMS root-key
-sources ([ADR-013](adr/ADR-013-root-key-sources.md)). Revised at every milestone
+**Status:** Current as of `v0.2.0`, the release that closed the retry-substitution
+risk of section 5.2 with part salts in the manifest
+([ADR-014](adr/ADR-014-part-salts-in-the-manifest.md)). Revised at every milestone
 that adds an attack surface.
 
 Everything below is implemented and covered by the attack tests of section 7 --

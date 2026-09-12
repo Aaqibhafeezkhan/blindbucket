@@ -4,7 +4,7 @@ What actually works, measured by pointing each client at the gateway and running
 it. Every result below came from a real client against a real MinIO, not from
 reading a specification.
 
-**Measured:** 2026-09-12, against `v0.1.0`.
+**Measured:** 2026-09-12, against `v0.2.0`.
 **Setup:** `docker compose up -d`, `blindbucket serve`, path-style, 64 KiB chunks.
 
 ---

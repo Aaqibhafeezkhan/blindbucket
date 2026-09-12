@@ -19,7 +19,7 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
   as <code>make demo</code>.
 </sub></p>
 
-> **Status: `v0.1.0` — usable.** Standard S3 clients round-trip through the
+> **Status: `v0.2.0` — usable.** Standard S3 clients round-trip through the
 > gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
 > 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
 > Key rotation, server-side copy, metrics and health endpoints are in, and the
@@ -130,7 +130,7 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 
 ```sh
 # Container: distroless, nonroot, no shell, 21 MB.
-docker pull ghcr.io/lennardgeissler/blindbucket:v0.1.0
+docker pull ghcr.io/lennardgeissler/blindbucket:v0.2.0
 
 # Or a binary, with checksums and an SBOM alongside it:
 #   https://github.com/LennardGeissler/blindbucket/releases

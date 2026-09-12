@@ -10,7 +10,7 @@ is version `1` and is specified in [docs/FORMAT.md](docs/FORMAT.md). A change to
 it would be a change to that number, announced here, and objects written under
 version 1 would keep being readable.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-12
 
 ### Added
 
@@ -106,6 +106,37 @@ its own copy of. The manifest lifecycle rules R1-R3 are an ordering of three
 writes that `spec/tla/Multipart.tla` checks; two implementations would
 eventually be two orderings, and only one of them was the one the model checked.
 
+### Known limitations
+
+- **Object names are not encrypted**, and object sizes are visible to the
+  provider. The primitive now exists (`internal/crypto/names`) but is not wired
+  into the gateway: encrypted names sort differently from plaintext ones, and an
+  unsorted listing was measured making `aws s3 sync --delete` delete seven of
+  eight objects that exist locally. A gateway whose argument is safety does not
+  ship that behind a note, so
+  [ADR-015](docs/adr/ADR-015-object-name-encryption.md) stays Proposed until the
+  ordering question has an answer.
+- **No `blindbucket reseal`.** Moving a keyring between a passphrase, Vault and
+  KMS means creating a new keyring and rotating objects onto it
+  ([ADR-013](docs/adr/ADR-013-root-key-sources.md)).
+- **The root key is in the gateway's memory** after unsealing, whichever source
+  sealed it. What Vault and KMS buy is custody and revocation, not runtime
+  secrecy — stated plainly because the opposite is easy to assume.
+- **The AWS credential chain is not used**; KMS credentials are configured
+  explicitly ([ADR-013](docs/adr/ADR-013-root-key-sources.md)).
+- **Presigned URLs** answer an error rather than being verified and reissued.
+- **Object tags** are refused rather than stored, because the provider would
+  hold them in plaintext ([ADR-012](docs/adr/ADR-012-copy-semantics.md)).
+- **`ListMultipartUploads`** is refused, and will stay that way: the upload ids
+  this gateway issues cannot be reconstructed from the provider's listing.
+  `ListParts` works.
+- **rclone and `mc`** need `allow_unsigned_payload` on the proxy; `mc` needs it
+  only for multipart. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+- **One benchmark cell** — 10 MiB uploads at 64 concurrent clients — runs at 18 %
+  of the direct path. The gateway's share is measured at 0.13 ms per request out
+  of ten seconds, so the time is the provider's; why it behaves that way under
+  this access pattern is not established.
+
 ## [0.1.0] — 2026-09-12
 
 The first release. A transparent S3 encryption gateway: point a client at it
@@ -187,5 +218,6 @@ figures and the methodology are in [bench/](bench/).
   of ten seconds, so the time is the provider's; why it behaves that way under
   this access pattern is not established.
 
-[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LennardGeissler/blindbucket/releases/tag/v0.1.0
