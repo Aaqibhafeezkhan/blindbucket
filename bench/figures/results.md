@@ -47,19 +47,38 @@ all three repetitions landed between 37.5 and 44.9 MiB/s, and the alternating
 order rules out the run before it being responsible. It is specific to PUT: GET
 at the same size and concurrency runs at 95%, and PUT at 16 clients at 95%.
 
-**The cause is not yet identified, and nothing here should be read as if it
-were.** What is known: the gateway process sits at near-zero CPU throughout, no
-request fails, and no file descriptors or memory accumulate. So it is waiting on
-something rather than doing work.
+**The gateway is not what is slow.** That was an open question when these numbers
+were first published; the observability work of M5 answered it. Two measurements:
 
-One hypothesis was the `Expect: 100-continue` handshake the upstream client sends
-with every body, which makes a request wait out `ExpectContinueTimeout` when the
-provider does not answer promptly. A build without it measured 221 MiB/s once --
-and then, on a controlled repeat, 33.9 MiB/s, while the unmodified build measured
-157. Those single measurements were not measurements; the repetition and the
-alternating order in `warp.sh` exist because of them. The hypothesis is neither
-confirmed nor ruled out, and the code is unchanged.
+A goroutine dump taken 14 seconds into the slow run shows 64 goroutines parked in
+`net/http.(*persistConn).roundTrip`, reached through `upstream.(*Client).do` from
+`proxy.putObject` — every request handler waiting for the provider to answer —
+and 64 more in the transport's `readLoop` waiting on the socket. None is blocked
+on encryption, on the `io.Pipe` between the encrypter and the upstream request,
+or on a lock.
 
-The next step is the pprof endpoint that M5 puts behind a flag: a goroutine dump
-taken during the slow run answers "waiting on what" directly, which no amount of
-black-box timing will.
+The metrics say the same thing with a number. Across one run of 184 uploads:
+
+```
+blindbucket_request_duration_seconds_sum{op="PutObject"}   1842.2189
+blindbucket_upstream_duration_seconds_sum{op="PutObject"}  1842.1952
+```
+
+The gap is **0.024 seconds across 184 requests -- 0.13 ms each**, against a mean
+of ten seconds per request. Everything else is the provider answering. That
+comparison is a ratio inside a single run rather than between runs, so the rig's
+variance does not touch it.
+
+**Why the provider is slower under this access pattern is still open.** The
+obvious candidate is the `Expect: 100-continue` handshake the upstream client
+sends with every body, which makes a request wait out `ExpectContinueTimeout`
+when the provider does not answer it promptly. It has now been tested twice, and
+both times the result was noise: once 221 MiB/s without it against 157 with, once
+the reverse; measured again through `blindbucket_upstream_duration_seconds`, 2.75s
+without against 4.60s with in the first repetition and 9.82s against 6.70s in the
+second. The hypothesis is neither confirmed nor ruled out, and the code is
+unchanged.
+
+What would settle it is a rig where the client, the gateway and the provider are
+not competing for the same ten cores and the same disk. On this one, 64 concurrent
+10 MiB uploads is a workload the machine cannot measure itself performing.

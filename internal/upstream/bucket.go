@@ -85,7 +85,7 @@ func (c *Client) ListObjects(ctx context.Context, bucket string, query url.Value
 	req.Host = u.Host
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, true)
+	resp, err := c.do(ctx, req, "ListObjects", true)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,7 @@ func (c *Client) DeleteObjects(ctx context.Context, bucket string, in DeleteRequ
 	req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(sum[:]))
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "DeleteObjects", false)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func (c *Client) Passthrough(ctx context.Context, method, bucket string, query u
 	}
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, method == http.MethodGet || method == http.MethodHead)
+	resp, err := c.do(ctx, req, "Passthrough", method == http.MethodGet || method == http.MethodHead)
 	if err != nil {
 		return nil, err
 	}

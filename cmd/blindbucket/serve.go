@@ -12,8 +12,12 @@ import (
 	"time"
 
 	"github.com/LennardGeissler/blindbucket/internal/auth"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+
 	"github.com/LennardGeissler/blindbucket/internal/config"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
+	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/proxy"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
@@ -69,6 +73,13 @@ Flags:
 		return err
 	}
 
+	// The registry is built before the upstream client so that the client can
+	// report how long the provider takes without knowing what a metric is.
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(
+		collectors.ProcessCollectorOpts{}))
+	metrics := obs.NewMetrics(registry)
+
 	client, err := upstream.New(upstream.Config{
 		Endpoint:        cfg.Upstream.Endpoint,
 		Region:          cfg.Upstream.Region,
@@ -76,6 +87,7 @@ Flags:
 		AccessKeyID:     cfg.Upstream.AccessKeyID,
 		SecretAccessKey: cfg.Upstream.SecretAccessKey,
 		SessionToken:    cfg.Upstream.SessionToken,
+		ObserveRequest:  metrics.Upstream,
 	})
 	if err != nil {
 		return err
@@ -103,6 +115,7 @@ Flags:
 		BaseDomain:    cfg.Server.BaseDomain,
 		Log2ChunkSize: cfg.Crypto.Log2ChunkSize,
 		Logger:        log,
+		Metrics:       metrics,
 	})
 	if err != nil {
 		return err
@@ -123,6 +136,30 @@ Flags:
 	listener, err := net.Listen("tcp", cfg.Server.Listen)
 	if err != nil {
 		return err
+	}
+
+	// Metrics, health and profiles live on their own address. An empty
+	// admin.listen turns the whole listener off rather than exporting nothing
+	// on a port nobody asked for.
+	var admin *obs.AdminServer
+	if cfg.Admin.Listen != "" {
+		admin = obs.NewAdminServer(obs.AdminConfig{
+			Listen:      cfg.Admin.Listen,
+			EnablePprof: cfg.Admin.Pprof,
+			Registry:    registry,
+			Ready:       readiness(client, ring, probeBucket(cfg)),
+			Logger:      log,
+		})
+		if err := admin.Start(); err != nil {
+			return err
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := admin.Shutdown(shutdownCtx); err != nil {
+				log.Warn("the admin listener did not stop cleanly", "err", err)
+			}
+		}()
 	}
 
 	log.Info("blindbucket listening",
@@ -180,4 +217,43 @@ func loadServerKeyring(cfg *config.Config, pass *passphraseFlags) (*keys.Keyring
 	}
 	defer clear(phrase)
 	return keys.LoadKeyring(data, phrase)
+}
+
+// probeBucket picks a bucket for the readiness check to look at.
+//
+// There is no "the" bucket in the configuration -- a client names one per
+// request -- so the first concrete bucket a credential is scoped to is used. A
+// deployment whose credentials are all wildcards gives nothing to probe, and
+// readiness then reports on the keyring alone rather than inventing a name.
+func probeBucket(cfg *config.Config) string {
+	for _, client := range cfg.Clients {
+		for _, bucket := range client.Buckets {
+			if bucket != "" && bucket != auth.AllBuckets {
+				return bucket
+			}
+		}
+	}
+	return ""
+}
+
+// readiness reports whether the gateway can actually serve.
+//
+// Liveness is "the process runs"; readiness is "the keyring is loaded and the
+// provider answers", which is the pair CONCEPT.md section 17.3 asks for. The
+// provider check is a bucket HEAD rather than a listing: it is the cheapest call
+// that still proves credentials and connectivity, and it reads nothing.
+func readiness(client *upstream.Client, ring *keys.Keyring, bucket string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if ring.ActiveKID() == "" {
+			return errors.New("no active key in the keyring")
+		}
+		if bucket == "" {
+			// Nothing concrete to probe against; the keyring check stands alone.
+			return nil
+		}
+		if _, err := client.Passthrough(ctx, http.MethodHead, bucket, nil, nil); err != nil {
+			return fmt.Errorf("upstream: %w", err)
+		}
+		return nil
+	}
 }

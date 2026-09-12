@@ -70,7 +70,7 @@ func (c *Client) PutObject(ctx context.Context, in PutObjectInput) (*PutObjectOu
 	applyObjectHeaders(req.Header, in)
 
 	//nolint:bodyclose // closed by drainAndClose, which the linter cannot see through.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "PutObject", false)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (c *Client) GetObject(ctx context.Context, in GetObjectInput) (*GetObjectOu
 	setIfNotEmpty(req.Header, "If-Match", in.IfMatch)
 
 	//nolint:bodyclose // the body is the point: it is handed to the caller, who closes it.
-	resp, err := c.do(ctx, req, true)
+	resp, err := c.do(ctx, req, "GetObject", true)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func (c *Client) HeadObject(ctx context.Context, bucket, key string) (*ObjectInf
 		return nil, err
 	}
 	//nolint:bodyclose // closed by drainAndClose, which the linter cannot see through.
-	resp, err := c.do(ctx, req, true)
+	resp, err := c.do(ctx, req, "HeadObject", true)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,7 @@ func (c *Client) DeleteObject(ctx context.Context, bucket, key string) error {
 		return err
 	}
 	//nolint:bodyclose // closed by drainAndClose, which the linter cannot see through.
-	resp, err := c.do(ctx, req, true)
+	resp, err := c.do(ctx, req, "DeleteObject", true)
 	if err != nil {
 		if NotFound(err) {
 			return nil

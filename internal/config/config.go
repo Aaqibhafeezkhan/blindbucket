@@ -21,6 +21,21 @@ type Config struct {
 	Clients  []Client `yaml:"clients"`
 	Keys     Keys     `yaml:"keys"`
 	Crypto   Crypto   `yaml:"crypto"`
+	Admin    Admin    `yaml:"admin"`
+}
+
+// Admin is the operator-facing listener: metrics, health and, if asked for,
+// profiles.
+//
+// It is a separate address from the S3 port because none of it is for storage
+// clients. Leaving it on loopback is the default for the same reason.
+type Admin struct {
+	// Listen is the address to serve on. Empty disables the listener entirely;
+	// the gateway then serves S3 and exports nothing.
+	Listen string `yaml:"listen"`
+	// Pprof exposes /debug/pprof on the admin listener. Off by default:
+	// profiles carry goroutine stacks and heap contents.
+	Pprof bool `yaml:"pprof"`
 }
 
 // Client is one credential the proxy accepts from its own clients.

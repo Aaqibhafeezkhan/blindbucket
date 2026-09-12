@@ -11,6 +11,7 @@ import (
 
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/manifest"
+	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
@@ -423,7 +424,12 @@ func (p *Proxy) getMultipartObject(
 	w.Header().Set("Content-Length", strconv.FormatInt(layout.totalPlain, 10))
 	w.WriteHeader(http.StatusOK)
 
+	p.metrics.StreamStarted(obs.Download)
+	defer p.metrics.StreamFinished(obs.Download)
+
 	written, copyErr := io.Copy(w, chain)
+	p.metrics.Bytes(obs.InCipher, out.ContentLength)
+	p.metrics.Bytes(obs.OutPlain, written)
 	if copyErr != nil {
 		p.abortResponse(log, written, layout.totalPlain, copyErr)
 	}

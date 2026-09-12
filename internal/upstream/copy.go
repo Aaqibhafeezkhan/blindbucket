@@ -85,7 +85,7 @@ func (c *Client) CopyObject(ctx context.Context, in CopyObjectInput) (*CopyObjec
 	})
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "CopyObject", false)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func (c *Client) UploadPartCopy(ctx context.Context, in UploadPartCopyInput) (st
 	setIfNotEmpty(req.Header, "X-Amz-Copy-Source-If-Match", in.SourceIfMatch)
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "UploadPartCopy", false)
 	if err != nil {
 		return "", err
 	}

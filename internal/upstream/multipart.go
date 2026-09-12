@@ -62,7 +62,7 @@ func (c *Client) CreateMultipartUpload(ctx context.Context, in CreateMultipartUp
 	})
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "CreateMultipartUpload", false)
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +121,7 @@ func (c *Client) UploadPart(ctx context.Context, in UploadPartInput) (string, er
 	req.ContentLength = in.ContentLength
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "UploadPart", false)
 	if err != nil {
 		return "", err
 	}
@@ -203,7 +203,7 @@ func (c *Client) CompleteMultipartUpload(
 	setIfNotEmpty(req.Header, "If-Match", in.IfMatch)
 
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, false)
+	resp, err := c.do(ctx, req, "CompleteMultipartUpload", false)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ func (c *Client) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID
 		return err
 	}
 	//nolint:bodyclose // closed by drainAndClose below.
-	resp, err := c.do(ctx, req, true)
+	resp, err := c.do(ctx, req, "AbortMultipartUpload", true)
 	if err != nil {
 		if NotFound(err) || NoSuchUpload(err) {
 			return nil
@@ -290,7 +290,7 @@ func (c *Client) ListParts(ctx context.Context, bucket, key, uploadID string) ([
 			return nil, err
 		}
 		//nolint:bodyclose // closed by drainAndClose below.
-		resp, err := c.do(ctx, req, true)
+		resp, err := c.do(ctx, req, "ListParts", true)
 		if err != nil {
 			return nil, err
 		}
@@ -356,7 +356,7 @@ func (c *Client) ListMultipartUploads(ctx context.Context, bucket, prefix string
 			return nil, err
 		}
 		//nolint:bodyclose // closed by drainAndClose below.
-		resp, err := c.do(ctx, req, true)
+		resp, err := c.do(ctx, req, "ListMultipartUploads", true)
 		if err != nil {
 			return nil, err
 		}

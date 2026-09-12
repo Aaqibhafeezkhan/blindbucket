@@ -236,18 +236,51 @@ belongs to the provider rather than to the gateway.
 
 **One cell does not fit that picture**, and it is left standing rather than
 dropped: 10 MiB PUTs at 64 concurrent clients run at 18 % of direct. It
-reproduces across all three repetitions, it is specific to PUT — GET at the same
-load is at 95 % — and the gateway process is idle while it happens, so it is
-waiting on something rather than working. The cause is not identified yet.
-[bench/figures/results.md](bench/figures/results.md) has the full table, the
-hypothesis that did not survive its own repeat measurement, and what would settle
-it.
+reproduces across all three repetitions and is specific to PUT — GET at the same
+load is at 95 %.
+
+The gateway is not what is slow, and that is now measured rather than guessed. A
+goroutine dump during the run shows every request handler parked waiting for the
+provider to answer, none of them on encryption or on a lock. The metrics put a
+number on it: across 184 uploads, total request time exceeded time spent waiting
+for the provider by 0.024 seconds — **0.13 ms per request**, against a mean of ten
+seconds each. Why the provider is slower under this particular access pattern is
+still open; the obvious candidate has now failed to reproduce twice.
+[bench/figures/results.md](bench/figures/results.md) has the numbers and what
+would settle it.
 
 One honest asterisk: the CLI's peak resident memory is about 70 MiB, essentially
 all of it the 64 MiB Argon2id arena used once to unlock the keyring. That is a
 deliberate trade — memory hardness is the point of Argon2id — and it is why the
 constant-memory claim is measured on the Go heap rather than inferred from RSS.
 [ADR-002](docs/adr/ADR-002-key-hierarchy.md) records the reasoning.
+
+## Running it
+
+Metrics, health and profiles sit on their own address, away from the S3 port:
+
+```yaml
+admin:
+  listen: "127.0.0.1:9100"
+  pprof: false          # goroutine stacks and heap contents; on only when looking
+```
+
+```sh
+curl -s localhost:9100/healthz     # the process is up
+curl -s localhost:9100/readyz      # the keyring is loaded and the provider answers
+curl -s localhost:9100/metrics     # Prometheus
+```
+
+`/healthz` deliberately does not touch the provider: a restart loop caused by an
+upstream outage is worse than the outage. `/readyz` does, and says which half
+failed.
+
+The metric worth an alert is `blindbucket_integrity_failures_total{kind}`. It
+counts stored data that failed authentication, which means either a bug here or a
+provider modifying objects — and neither should be discovered by a user opening a
+file. The rest cover requests, upstream latency, bytes by direction and streams in
+flight; `blindbucket_active_streams` is the one that should track memory, since
+memory is a function of streams in flight and not of object size.
 
 ## Documentation
 
@@ -259,6 +292,7 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
 | [ref/python/](ref/python/) | A second decoder written from the format spec alone, and the differential test that compares it against the Go one. |
+| [bench/](bench/) | Benchmark scripts, the figures they produce, and the methodology notes that came out of getting them wrong first. |
 | [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
@@ -273,7 +307,8 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | **done** |
-| M5 | Production: KMS/Vault providers, `CopyObject`, metrics | planned |
+| M5 | Production: KMS/Vault providers, `CopyObject`, release | planned |
+| — | Metrics, health endpoints and pprof on a separate admin listener | **done** |
 | — | `blindbucket rotate`: KEK rotation with conditional writes | **done** |
 | — | Benchmarks: micro, memory, `warp` macro comparison, figures | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |

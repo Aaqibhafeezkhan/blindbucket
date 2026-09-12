@@ -118,7 +118,7 @@ type errorXML struct {
 // A provider that returns a body which is not the documented XML -- an HTML
 // error page from a proxy in front of it, say -- still produces a usable error
 // rather than a parse failure that hides the status code.
-func newAPIError(resp *http.Response) *APIError {
+func newAPIError(resp *http.Response, op string) *APIError {
 	out := &APIError{
 		StatusCode: resp.StatusCode,
 		RequestID:  resp.Header.Get("x-amz-request-id"),
@@ -138,16 +138,32 @@ func newAPIError(resp *http.Response) *APIError {
 		}
 	}
 
-	out.Code = statusCode(resp.StatusCode)
+	out.Code = statusCode(resp.StatusCode, op)
 	out.Message = http.StatusText(resp.StatusCode)
 	return out
 }
 
+// bucketLevelOps address a bucket rather than an object, so a 404 from them
+// means the bucket is missing and not the key.
+var bucketLevelOps = map[string]bool{
+	"Passthrough":          true,
+	"ListObjects":          true,
+	"DeleteObjects":        true,
+	"ListMultipartUploads": true,
+}
+
 // statusCode maps a bare HTTP status to the S3 error code a client expects,
 // for providers that answer without a body.
-func statusCode(status int) string {
+//
+// A HEAD never carries one, so this path is the only source of a code for
+// HeadObject and HeadBucket -- which is why the operation matters: answering
+// NoSuchKey for a missing *bucket* sends a client looking for the wrong thing.
+func statusCode(status int, op string) string {
 	switch status {
 	case http.StatusNotFound:
+		if bucketLevelOps[op] {
+			return "NoSuchBucket"
+		}
 		return "NoSuchKey"
 	case http.StatusForbidden:
 		return "AccessDenied"

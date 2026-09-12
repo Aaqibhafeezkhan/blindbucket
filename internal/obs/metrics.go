@@ -1,0 +1,213 @@
+package obs
+
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// Byte directions for blindbucket_bytes_total.
+//
+// The four are kept apart because their ratio is the thing worth watching: the
+// gap between plaintext in and ciphertext out is the format's overhead, and a
+// gap that moves without a configuration change means something else did.
+const (
+	InPlain   = "in_plain"   // plaintext read from a client
+	OutCipher = "out_cipher" // ciphertext written to the provider
+	InCipher  = "in_cipher"  // ciphertext read from the provider
+	OutPlain  = "out_plain"  // plaintext written to a client
+)
+
+// Stream directions for blindbucket_active_streams.
+const (
+	Upload   = "upload"
+	Download = "download"
+)
+
+// Kinds of integrity failure, for blindbucket_integrity_failures_total.
+//
+// A rise in any of them means either a bug here or a provider modifying stored
+// data, and the two are worth telling apart from an ordinary 5xx.
+const (
+	KindChunk     = "chunk"
+	KindHeader    = "header"
+	KindDEKUnwrap = "dek_unwrap"
+	KindManifest  = "manifest"
+	KindToken     = "token"
+	KindSize      = "size"
+)
+
+// Metrics is the instrument panel of CONCEPT.md section 17.1.
+//
+// A nil *Metrics is usable and records nothing, so a caller that was built
+// without observability does not need a branch at every call site.
+type Metrics struct {
+	requests          *prometheus.CounterVec
+	requestDuration   *prometheus.HistogramVec
+	upstreamDuration  *prometheus.HistogramVec
+	bytes             *prometheus.CounterVec
+	activeStreams     *prometheus.GaugeVec
+	integrityFailures *prometheus.CounterVec
+	authFailures      *prometheus.CounterVec
+	checksumMismatch  *prometheus.CounterVec
+}
+
+// NewMetrics registers the collectors and returns them.
+func NewMetrics(reg prometheus.Registerer) *Metrics {
+	factory := promauto{reg}
+	return &Metrics{
+		requests: factory.counterVec(prometheus.CounterOpts{
+			Name: "blindbucket_requests_total",
+			Help: "S3 requests served, by operation and HTTP status.",
+		}, []string{"op", "status"}),
+
+		requestDuration: factory.histogramVec(prometheus.HistogramOpts{
+			Name: "blindbucket_request_duration_seconds",
+			Help: "Time to serve an S3 request, by operation.",
+			// Reaches into minutes on purpose: a multi-gigabyte GET is a normal
+			// request here, and the default buckets stop at ten seconds.
+			Buckets: []float64{0.001, 0.005, 0.025, 0.1, 0.5, 1, 5, 30, 120, 600},
+		}, []string{"op"}),
+
+		upstreamDuration: factory.histogramVec(prometheus.HistogramOpts{
+			Name:    "blindbucket_upstream_duration_seconds",
+			Help:    "Time spent in a call to the storage provider, by operation.",
+			Buckets: []float64{0.001, 0.005, 0.025, 0.1, 0.5, 1, 5, 30, 120, 600},
+		}, []string{"op"}),
+
+		bytes: factory.counterVec(prometheus.CounterOpts{
+			Name: "blindbucket_bytes_total",
+			Help: "Bytes moved, by direction: in_plain, out_cipher, in_cipher, out_plain.",
+		}, []string{"direction"}),
+
+		activeStreams: factory.gaugeVec(prometheus.GaugeOpts{
+			Name: "blindbucket_active_streams",
+			Help: "Streams in flight. Memory is a function of this, not of object size.",
+		}, []string{"direction"}),
+
+		integrityFailures: factory.counterVec(prometheus.CounterOpts{
+			Name: "blindbucket_integrity_failures_total",
+			Help: "Stored data that failed authentication. A rise means a bug or a " +
+				"provider modifying objects, and should alert.",
+		}, []string{"kind"}),
+
+		authFailures: factory.counterVec(prometheus.CounterOpts{
+			Name: "blindbucket_auth_failures_total",
+			Help: "Inbound requests that failed signature verification, by reason.",
+		}, []string{"reason"}),
+
+		checksumMismatch: factory.counterVec(prometheus.CounterOpts{
+			Name: "blindbucket_checksum_mismatches_total",
+			Help: "Uploads whose end-to-end checksum did not match, by algorithm.",
+		}, []string{"algorithm"}),
+	}
+}
+
+// Request records one served request.
+func (m *Metrics) Request(op string, status int, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.requests.WithLabelValues(op, statusLabel(status)).Inc()
+	m.requestDuration.WithLabelValues(op).Observe(d.Seconds())
+}
+
+// Upstream records one call to the storage provider.
+func (m *Metrics) Upstream(op string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.upstreamDuration.WithLabelValues(op).Observe(d.Seconds())
+}
+
+// Bytes records bytes moved in one direction.
+func (m *Metrics) Bytes(direction string, n int64) {
+	if m == nil || n <= 0 {
+		return
+	}
+	m.bytes.WithLabelValues(direction).Add(float64(n))
+}
+
+// StreamStarted records a stream entering flight.
+func (m *Metrics) StreamStarted(direction string) {
+	if m != nil {
+		m.activeStreams.WithLabelValues(direction).Inc()
+	}
+}
+
+// StreamFinished records a stream leaving flight. Every StreamStarted needs
+// exactly one of these, or the gauge drifts and stops meaning anything.
+func (m *Metrics) StreamFinished(direction string) {
+	if m != nil {
+		m.activeStreams.WithLabelValues(direction).Dec()
+	}
+}
+
+// IntegrityFailure records stored data that failed authentication.
+func (m *Metrics) IntegrityFailure(kind string) {
+	if m != nil {
+		m.integrityFailures.WithLabelValues(kind).Inc()
+	}
+}
+
+// AuthFailure records a request that failed verification.
+func (m *Metrics) AuthFailure(reason string) {
+	if m != nil {
+		m.authFailures.WithLabelValues(reason).Inc()
+	}
+}
+
+// ChecksumMismatch records an upload whose checksum did not match.
+func (m *Metrics) ChecksumMismatch(algorithm string) {
+	if m != nil {
+		m.checksumMismatch.WithLabelValues(algorithm).Inc()
+	}
+}
+
+// statusLabel buckets a status by class.
+//
+// The exact code is in the logs; as a metric label it would be unbounded enough
+// to matter and is not what an alert looks at.
+func statusLabel(status int) string {
+	switch {
+	case status >= 500:
+		return "5xx"
+	case status >= 400:
+		return "4xx"
+	case status >= 300:
+		return "3xx"
+	case status >= 200:
+		return "2xx"
+	default:
+		return "other"
+	}
+}
+
+// promauto registers each collector as it is built, so a duplicate name is a
+// panic at startup rather than a metric that silently never appears.
+type promauto struct{ reg prometheus.Registerer }
+
+func (p promauto) counterVec(opts prometheus.CounterOpts, labels []string) *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(opts, labels)
+	p.register(c)
+	return c
+}
+
+func (p promauto) histogramVec(opts prometheus.HistogramOpts, labels []string) *prometheus.HistogramVec {
+	h := prometheus.NewHistogramVec(opts, labels)
+	p.register(h)
+	return h
+}
+
+func (p promauto) gaugeVec(opts prometheus.GaugeOpts, labels []string) *prometheus.GaugeVec {
+	g := prometheus.NewGaugeVec(opts, labels)
+	p.register(g)
+	return g
+}
+
+func (p promauto) register(c prometheus.Collector) {
+	if p.reg == nil {
+		return
+	}
+	p.reg.MustRegister(c)
+}

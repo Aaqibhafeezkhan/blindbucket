@@ -11,6 +11,7 @@ import (
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/manifest"
+	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upload"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
@@ -193,6 +194,9 @@ func (p *Proxy) uploadPart(
 			"part of %d bytes exceeds the maximum part size of %d bytes", plainLen, maximum)
 	}
 
+	p.metrics.StreamStarted(obs.Upload)
+	defer p.metrics.StreamFinished(obs.Upload)
+
 	pr, pw := io.Pipe()
 	encDone := make(chan error, 1)
 	go func() {
@@ -256,6 +260,8 @@ func (p *Proxy) uploadPart(
 	echoVerifiedChecksums(w.Header(), r.Header, body.Trailer())
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusOK)
+	p.metrics.Bytes(obs.InPlain, plainLen)
+	p.metrics.Bytes(obs.OutCipher, sealedLen)
 	log.Info("part stored", "part", req.PartNumber,
 		"plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen)
 	return nil

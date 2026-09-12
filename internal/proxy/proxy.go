@@ -8,11 +8,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/objectmeta"
+	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
@@ -41,6 +43,9 @@ type Config struct {
 	// fallback for reading objects whose metadata does not record one.
 	Log2ChunkSize uint8
 	Logger        *slog.Logger
+	// Metrics records what the gateway did. A nil value records nothing, which
+	// is what the tests use.
+	Metrics *obs.Metrics
 }
 
 // Proxy serves the S3 API, encrypting on the way in and decrypting on the way
@@ -52,6 +57,7 @@ type Proxy struct {
 	baseDomain string
 	log2C      uint8
 	log        *slog.Logger
+	metrics    *obs.Metrics
 
 	// hook is called at the coordination points named in hooks.go. It exists so
 	// that the integration tests can replay the model's counterexamples, and is
@@ -87,6 +93,7 @@ func New(cfg Config) (*Proxy, error) {
 		baseDomain: cfg.BaseDomain,
 		log2C:      log2C,
 		log:        logger,
+		metrics:    cfg.Metrics,
 	}, nil
 }
 
@@ -94,9 +101,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := newRequestID()
 	w.Header().Set("x-amz-request-id", requestID)
 
+	// Counting here rather than in each handler means a new operation is
+	// instrumented by existing, and a handler that returns early still counts.
+	started := time.Now()
+	recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	w = recorder
+
 	req, apiErr := s3api.Route(r, p.baseDomain)
 	if apiErr != nil {
 		p.fail(w, r, requestID, req, apiErr)
+		p.metrics.Request(string(req.Op), recorder.status, time.Since(started))
 		return
 	}
 
@@ -112,7 +126,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authResult, authErr := p.verifier.Verify(r, req.Bucket)
 	if authErr != nil {
 		log.Warn("rejecting a request that failed verification", "err", authErr)
-		p.fail(w, r, requestID, req, translateAuth(authErr))
+		translated := translateAuth(authErr)
+		p.metrics.AuthFailure(translated.Code)
+		p.fail(w, r, requestID, req, translated)
+		p.metrics.Request(string(req.Op), recorder.status, time.Since(started))
 		return
 	}
 	log = log.With("client", authResult.Client.Name)
@@ -152,7 +169,34 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		p.fail(w, r, requestID, req, err)
 	}
+	p.metrics.Request(string(req.Op), recorder.status, time.Since(started))
 }
+
+// statusRecorder remembers the status a handler wrote.
+//
+// It does not wrap Write beyond the implicit 200, because the byte counts are
+// recorded where the plaintext and the ciphertext are actually distinguishable,
+// which this layer cannot do.
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written bool
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	if !r.written {
+		r.status, r.written = status, true
+	}
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.written = true
+	return r.ResponseWriter.Write(b)
+}
+
+// Unwrap lets net/http reach the underlying writer for Flush and the like.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // fail logs and renders an error response.
 func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, requestID string, req s3api.Request, apiErr *s3api.Error) {

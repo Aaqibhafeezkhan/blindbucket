@@ -42,6 +42,12 @@ type Config struct {
 	// MaxRetries bounds retries of idempotent, bodyless requests. Zero selects
 	// the default of 3.
 	MaxRetries int
+
+	// ObserveRequest, if set, is called with the S3 operation and how long the
+	// provider took to answer it, retries included. It is how
+	// blindbucket_upstream_duration_seconds is filled without this package
+	// knowing anything about metrics.
+	ObserveRequest func(op string, d time.Duration)
 }
 
 // Client is a small signing S3 client built on net/http.
@@ -60,6 +66,7 @@ type Client struct {
 	signer     *v4.Signer
 	httpClient *http.Client
 	maxRetries int
+	observe    func(op string, d time.Duration)
 
 	// now is overridable so signing can be tested against fixed timestamps.
 	now func() time.Time
@@ -108,6 +115,7 @@ func New(cfg Config) (*Client, error) {
 		signer:     v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true }),
 		httpClient: httpClient,
 		maxRetries: retries,
+		observe:    cfg.ObserveRequest,
 		now:        time.Now,
 	}, nil
 }
@@ -202,7 +210,12 @@ func (c *Client) sign(ctx context.Context, req *http.Request) error {
 // Retries are limited to requests that carry no body. A failed upload cannot be
 // replayed -- the client's stream has already been consumed -- so the error goes
 // back to the client, which is the only party still able to resend the data.
-func (c *Client) do(ctx context.Context, req *http.Request, retryable bool) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, req *http.Request, op string, retryable bool) (*http.Response, error) {
+	if c.observe != nil {
+		started := c.now()
+		defer func() { c.observe(op, time.Since(started)) }()
+	}
+
 	attempts := 1
 	if retryable {
 		attempts = c.maxRetries
@@ -242,7 +255,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, retryable bool) (*ht
 			return resp, nil
 		}
 
-		apiErr := newAPIError(resp)
+		apiErr := newAPIError(resp, op)
 		_ = resp.Body.Close()
 		if !shouldRetry(resp.StatusCode) {
 			return nil, apiErr

@@ -12,6 +12,15 @@ server:
   #   cert_file: /etc/blindbucket/tls.crt
   #   key_file: /etc/blindbucket/tls.key
 
+# Operator-facing listener: metrics, health and, if asked for, profiles. None of
+# it is for storage clients, which is why it is a separate address and why the
+# default stays on loopback. Leave listen empty to disable it entirely.
+admin:
+  listen: "127.0.0.1:9100"
+  # /debug/pprof exposes goroutine stacks and heap contents. Off unless you are
+  # looking at something.
+  pprof: false
+
 upstream:
   endpoint: http://localhost:9002        # the MinIO from docker-compose.yml
   region: us-east-1                      # "auto" for Cloudflare R2

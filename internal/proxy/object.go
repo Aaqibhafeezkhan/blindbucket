@@ -12,6 +12,7 @@ import (
 	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
+	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
@@ -74,6 +75,9 @@ func (p *Proxy) putObject(
 	// The encrypter runs in its own goroutine writing into a pipe, and the
 	// upstream request reads the other end. There is no buffer between them, so
 	// a slow upstream slows the read from the client through TCP flow control.
+	p.metrics.StreamStarted(obs.Upload)
+	defer p.metrics.StreamFinished(obs.Upload)
+
 	pr, pw := io.Pipe()
 	encDone := make(chan error, 1)
 	go func() {
@@ -143,6 +147,8 @@ func (p *Proxy) putObject(
 
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusOK)
+	p.metrics.Bytes(obs.InPlain, plainLen)
+	p.metrics.Bytes(obs.OutCipher, sealedLen)
 	log.Info("object stored", "plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen, "kid", kid)
 	return nil
 }
@@ -190,7 +196,12 @@ func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 	w.Header().Set("Content-Length", strconv.FormatInt(plainLen, 10))
 	w.WriteHeader(http.StatusOK)
 
+	p.metrics.StreamStarted(obs.Download)
+	defer p.metrics.StreamFinished(obs.Download)
+
 	written, copyErr := io.Copy(w, reader)
+	p.metrics.Bytes(obs.InCipher, out.ContentLength)
+	p.metrics.Bytes(obs.OutPlain, written)
 	if copyErr != nil {
 		p.abortResponse(log, written, plainLen, copyErr)
 	}
@@ -464,8 +475,31 @@ func (p *Proxy) abortResponse(log *slog.Logger, written, expected int64, err err
 // modifying stored data. M5 turns this into the
 // blindbucket_integrity_failures_total metric.
 func (p *Proxy) integrityError(log *slog.Logger, kind string, err error) *s3api.Error {
+	p.metrics.IntegrityFailure(metricKind(kind))
 	log.Error("integrity check failed", "kind", kind, "err", err)
 	return s3api.ErrIntegrity.WithMessage("the stored object failed authentication (%s)", kind)
+}
+
+// metricKind maps the human phrase an integrity failure is logged with onto the
+// bounded label set of blindbucket_integrity_failures_total.
+//
+// The log line stays free to say something specific; the metric label may not,
+// because an unbounded label is a memory leak in the scraper.
+func metricKind(kind string) string {
+	switch kind {
+	case "first chunk", "chunk size":
+		return obs.KindChunk
+	case "segment header":
+		return obs.KindHeader
+	case "data key", "upload data key":
+		return obs.KindDEKUnwrap
+	case "manifest":
+		return obs.KindManifest
+	case "ciphertext size", "object size", "range mapping":
+		return obs.KindSize
+	default:
+		return obs.KindHeader
+	}
 }
 
 // parseRange parses a single HTTP byte range against a known size.
