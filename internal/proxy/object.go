@@ -38,6 +38,11 @@ func (p *Proxy) putObject(
 		return s3api.ErrMissingContentLength
 	}
 
+	// The same rule in the other direction: an upload may take as long as it
+	// takes, but a client that sends nothing for a minute is not uploading.
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
 	sealedLen, err := stream.SealedSize(plainLen, p.log2C)
 	if err != nil {
 		return s3api.ErrEntityTooLarge.WithMessage("object of %d bytes cannot be stored: %v", plainLen, err)
@@ -90,7 +95,7 @@ func (p *Proxy) putObject(
 		// A checksum failure surfaces from this copy, before Close. Close writes
 		// the final chunk, so a body that failed verification never becomes a
 		// complete segment and the upstream stores nothing.
-		_, copyErr := io.Copy(ew, body)
+		_, copyErr := io.Copy(ew, guardedReader{src: body, guard: guard})
 		if copyErr == nil {
 			copyErr = ew.Close()
 		}
@@ -199,7 +204,11 @@ func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 	p.metrics.StreamStarted(obs.Download)
 	defer p.metrics.StreamFinished(obs.Download)
 
-	written, copyErr := io.Copy(w, reader)
+	// A download may run for hours; it may not stall for a minute (12.3).
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
+	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, reader)
 	p.metrics.Bytes(obs.InCipher, out.ContentLength)
 	p.metrics.Bytes(obs.OutPlain, written)
 	if copyErr != nil {
@@ -315,7 +324,10 @@ func (p *Proxy) getObjectRange(
 	w.Header().Set("Content-Length", strconv.FormatInt(rng.Length, 10))
 	w.WriteHeader(http.StatusPartialContent)
 
-	written, copyErr := io.Copy(w, reader)
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
+	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, reader)
 	if copyErr != nil {
 		p.abortResponse(log, written, rng.Length, copyErr)
 	}

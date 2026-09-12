@@ -48,6 +48,12 @@ a client write that lands mid-rotation wins ([ADR-009](docs/adr/ADR-009-rotation
 admin listener that defaults to loopback. Graceful shutdown. A distroless,
 nonroot image and a Kubernetes sidecar example in [deploy/](deploy/).
 
+Transfers have no fixed time limit and no unbounded one either: there is no
+global `WriteTimeout`, because it would cut off a large download regardless of
+progress, and instead the connection's deadlines are renewed as bytes move. A
+5 TiB download may take hours; a connection that has moved nothing for a minute
+is closed.
+
 ### Verified
 
 **A formal model.** Concept version 0.1 contained two race conditions in the
@@ -82,11 +88,6 @@ figures and the methodology are in [bench/](bench/).
   accepted, with the M6 options that would change them.
 - **rclone and `mc`** need `allow_unsigned_payload` on the proxy; `mc` needs it
   only for multipart. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
-- **Per-chunk write deadlines** are not implemented. There is deliberately no
-  global `WriteTimeout` — it would cut off a large download after a fixed time
-  regardless of progress — and the renewal through `http.ResponseController` that
-  should replace it is not there yet. A client that stops reading mid-download
-  holds its connection until it or the network gives up.
 - **One benchmark cell** — 10 MiB uploads at 64 concurrent clients — runs at 18 %
   of the direct path. The gateway's share is measured at 0.13 ms per request out
   of ten seconds, so the time is the provider's; why it behaves that way under

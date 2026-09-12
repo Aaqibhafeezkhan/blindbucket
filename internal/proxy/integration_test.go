@@ -97,7 +97,11 @@ type harness struct {
 	unsigned *http.Client
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness builds a gateway against a real provider. The options adjust the
+// proxy configuration for tests that need something other than the defaults --
+// a short stall timeout, say, where waiting out the real one would take a
+// minute.
+func newHarness(t *testing.T, options ...func(*Config)) *harness {
 	t.Helper()
 	endpoint := os.Getenv(endpointEnv)
 	if endpoint == "" {
@@ -125,13 +129,17 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("auth.NewVerifier: %v", err)
 	}
 
-	p, err := New(Config{
+	cfg := Config{
 		Upstream: client, Keys: ring, Verifier: verifier,
 		Log2ChunkSize: stream.MinLog2ChunkSize,
 		// Discard: these tests deliberately provoke errors, and the log noise
 		// would drown the failures that matter.
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
+	}
+	for _, option := range options {
+		option(&cfg)
+	}
+	p, err := New(cfg)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}

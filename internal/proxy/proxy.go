@@ -46,6 +46,9 @@ type Config struct {
 	// Metrics records what the gateway did. A nil value records nothing, which
 	// is what the tests use.
 	Metrics *obs.Metrics
+	// StallTimeout is how long a transfer may make no progress before its
+	// connection is dropped. Zero selects defaultStallTimeout.
+	StallTimeout time.Duration
 }
 
 // Proxy serves the S3 API, encrypting on the way in and decrypting on the way
@@ -58,6 +61,7 @@ type Proxy struct {
 	log2C      uint8
 	log        *slog.Logger
 	metrics    *obs.Metrics
+	stall      time.Duration
 
 	// hook is called at the coordination points named in hooks.go. It exists so
 	// that the integration tests can replay the model's counterexamples, and is
@@ -94,6 +98,7 @@ func New(cfg Config) (*Proxy, error) {
 		log2C:      log2C,
 		log:        logger,
 		metrics:    cfg.Metrics,
+		stall:      cfg.StallTimeout,
 	}, nil
 }
 

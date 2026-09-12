@@ -124,15 +124,12 @@ Flags:
 	srv := &http.Server{
 		Addr:    cfg.Server.Listen,
 		Handler: handler,
-		// Slowloris protection. There is deliberately no WriteTimeout: it would
-		// cut off a large download after a fixed time regardless of progress.
-		//
-		// CONCEPT.md 12.3 asks for per-chunk deadlines renewed through
-		// http.ResponseController instead -- a connection may run as long as it
-		// likes but not stall as long as it likes. That is not implemented: a
-		// client that stops reading mid-download holds its connection until it
-		// or the network gives up. It is a denial-of-service consideration
-		// rather than a confidentiality one, and it is listed as a known gap.
+		// Slowloris protection for the headers. There is deliberately no
+		// WriteTimeout: it would cut off a large download after a fixed time
+		// regardless of progress. What replaces it is per-transfer rather than
+		// per-server -- the proxy renews the connection's deadlines as bytes
+		// move, so a request may run as long as it likes but not stall as long
+		// as it likes (CONCEPT.md 12.3, internal/proxy/deadline.go).
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,

@@ -197,6 +197,9 @@ func (p *Proxy) uploadPart(
 	p.metrics.StreamStarted(obs.Upload)
 	defer p.metrics.StreamFinished(obs.Upload)
 
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
 	pr, pw := io.Pipe()
 	encDone := make(chan error, 1)
 	go func() {
@@ -211,7 +214,7 @@ func (p *Proxy) uploadPart(
 			encDone <- err
 			return
 		}
-		_, copyErr := io.Copy(ew, body)
+		_, copyErr := io.Copy(ew, guardedReader{src: body, guard: guard})
 		if copyErr == nil {
 			copyErr = ew.Close()
 		}

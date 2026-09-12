@@ -427,7 +427,10 @@ func (p *Proxy) getMultipartObject(
 	p.metrics.StreamStarted(obs.Download)
 	defer p.metrics.StreamFinished(obs.Download)
 
-	written, copyErr := io.Copy(w, chain)
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
+	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, chain)
 	p.metrics.Bytes(obs.InCipher, out.ContentLength)
 	p.metrics.Bytes(obs.OutPlain, written)
 	if copyErr != nil {
@@ -523,7 +526,10 @@ func (p *Proxy) getMultipartRange(
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
 
-	written, copyErr := io.Copy(w, chain)
+	guard := newStallGuard(w, p.stall)
+	defer guard.clear()
+
+	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, chain)
 	if copyErr != nil {
 		p.abortResponse(log, written, length, copyErr)
 	}
