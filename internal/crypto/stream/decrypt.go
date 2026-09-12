@@ -98,6 +98,13 @@ func (r *DecryptReader) VerifyFirst() error {
 // header is authenticated by the chunks, not on its own.
 func (r *DecryptReader) Header() SegmentParams { return r.header.params }
 
+// Salt returns the segment's salt, as read from its authenticated header.
+//
+// The header is associated data of every chunk, so a provider cannot change the
+// salt without every tag in the segment failing. That is what makes comparing
+// it against a manifest meaningful.
+func (r *DecryptReader) Salt() [SaltSize]byte { return r.header.salt }
+
 func (r *DecryptReader) Read(p []byte) (int, error) {
 	if r.err != nil {
 		return 0, r.err

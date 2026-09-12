@@ -69,6 +69,14 @@ func newEncryptWriter(dst io.Writer, dek []byte, h header) (*EncryptWriter, erro
 // before any byte is written, which lets a caller compute offsets up front.
 func (w *EncryptWriter) Header() [HeaderSize]byte { return w.header.raw }
 
+// Salt returns the segment's salt.
+//
+// It identifies this segment among every other encryption of the same
+// plaintext: FORMAT.md section 4.1 requires a fresh one per segment, including
+// per retried attempt at the same part number. That makes it the thing a
+// manifest records to pin down *which* attempt a part is (FORMAT.md section 10).
+func (w *EncryptWriter) Salt() [SaltSize]byte { return w.header.salt }
+
 func (w *EncryptWriter) Write(p []byte) (int, error) {
 	switch {
 	case w.err != nil:

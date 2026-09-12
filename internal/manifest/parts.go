@@ -30,6 +30,10 @@ type UploadedPart struct {
 	// CipherSize is the stored size of the part, which is one whole segment.
 	CipherSize int64
 	ETag       string
+	// Salt is the segment salt of the attempt this part was completed from.
+	// It comes from the client echoing back what the gateway sealed into the
+	// part's ETag, because a part of an open upload cannot be read.
+	Salt [stream.SaltSize]byte
 }
 
 // PartsFromUpstream converts the upstream's ciphertext part sizes into the part
@@ -77,7 +81,7 @@ func PartsFromUpstream(uploaded []UploadedPart, log2C uint8) ([]Part, error) {
 				"chunk size %d; configure a part size that is a multiple of %d",
 				ErrPartRules, up.Number, plain, chunk, chunk)
 		}
-		parts = append(parts, Part{Number: up.Number, PlainSize: plain})
+		parts = append(parts, Part{Number: up.Number, PlainSize: plain, Salt: up.Salt})
 	}
 
 	m := &Manifest{Parts: parts}

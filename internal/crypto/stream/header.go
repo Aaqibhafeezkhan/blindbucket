@@ -16,6 +16,19 @@ type header struct {
 	raw [HeaderSize]byte
 }
 
+// SaltFromHeader reads the salt out of a raw 32-byte segment header.
+//
+// The header is associated data of every chunk in its segment, so a caller that
+// has authenticated any chunk has also authenticated this value.
+func SaltFromHeader(raw []byte) ([SaltSize]byte, bool) {
+	var salt [SaltSize]byte
+	if len(raw) < HeaderSize {
+		return salt, false
+	}
+	copy(salt[:], raw[offSalt:offSalt+SaltSize])
+	return salt, true
+}
+
 // newHeader builds a header for p with a freshly generated salt.
 //
 // The salt is what separates one segment's subkey from every other segment's.

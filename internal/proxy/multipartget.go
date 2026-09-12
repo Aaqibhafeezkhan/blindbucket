@@ -33,15 +33,41 @@ type partLayout struct {
 	totalCipher int64
 	totalPlain  int64
 	log2C       uint8
+	// hasSalts reports that the manifest names which attempt each part is, so
+	// the segment headers can be checked against it. False for a manifest
+	// written before BBM2, where there is nothing to check against and an
+	// all-zero salt must not be mistaken for one.
+	hasSalts bool
+}
+
+// checkSalt refuses a segment that is not the attempt the manifest names.
+//
+// A client that retries a part leaves two valid segments under the same part
+// number, both authentic. Without this, a provider could serve either one and
+// every tag would verify -- THREAT_MODEL section 5.2. The salt is in the
+// authenticated header, so a provider cannot fake it without breaking every
+// chunk in the segment; it can only substitute a whole genuine segment, which
+// is exactly what this catches.
+func (l *partLayout) checkSalt(i int, got [stream.SaltSize]byte) error {
+	if !l.hasSalts {
+		return nil
+	}
+	if got != l.parts[i].Salt {
+		return fmt.Errorf(
+			"%w: part %d is a different attempt than the manifest names",
+			manifest.ErrVerify, l.parts[i].Number)
+	}
+	return nil
 }
 
 // newPartLayout computes the geometry of the parts a manifest describes.
-func newPartLayout(parts []manifest.Part, log2C uint8) (*partLayout, error) {
+func newPartLayout(parts []manifest.Part, log2C uint8, hasSalts bool) (*partLayout, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("%w: the manifest lists no parts", manifest.ErrVerify)
 	}
 	l := &partLayout{
 		parts:       parts,
+		hasSalts:    hasSalts,
 		sealed:      make([]int64, len(parts)),
 		cipherStart: make([]int64, len(parts)),
 		plainStart:  make([]int64, len(parts)),
@@ -135,6 +161,11 @@ func (c *segmentChain) open() error {
 		stream.SegmentParams{Log2ChunkSize: c.layout.log2C, Multipart: true, Index: part.Number},
 	)
 	if err != nil {
+		c.err = err
+		return err
+	}
+	if err := c.layout.checkSalt(c.idx, reader.Salt()); err != nil {
+		_ = reader.Close()
 		c.err = err
 		return err
 	}
@@ -279,6 +310,15 @@ func (c *rangeChain) open() error {
 				manifest.ErrVerify, part.Number, err)
 			return c.err
 		}
+	}
+
+	if salt, ok := stream.SaltFromHeader(header); !ok {
+		c.err = fmt.Errorf("%w: the header of part %d is short",
+			manifest.ErrVerify, part.Number)
+		return c.err
+	} else if err := c.layout.checkSalt(span.index, salt); err != nil {
+		c.err = err
+		return err
 	}
 
 	// Exactly the ciphertext of the chunks this part contributes, so the reader
@@ -550,7 +590,7 @@ func (p *Proxy) multipartLayout(
 		return nil, translateUpstream(err)
 	}
 
-	layout, err := newPartLayout(m.Parts, meta.Log2ChunkSize)
+	layout, err := newPartLayout(m.Parts, meta.Log2ChunkSize, m.HasSalts())
 	if err != nil {
 		return nil, p.integrityError(log, "manifest", err)
 	}

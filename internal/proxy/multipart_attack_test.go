@@ -9,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/manifest"
+	"github.com/LennardGeissler/blindbucket/internal/objectmeta"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
 
@@ -360,4 +362,132 @@ func (h *harness) readUpstream(t *testing.T, key string) []byte {
 		t.Fatalf("reading %q upstream: %v", key, err)
 	}
 	return raw
+}
+
+// TestIntegrationRetrySubstitution is THREAT_MODEL section 5.2, as an attack.
+//
+// A client that retries a part leaves two segments under the same part number,
+// both genuine, both produced by this gateway under the same data key. Nothing
+// in a segment distinguishes them: the part number is authenticated and equal,
+// the sizes are equal, every chunk tag verifies. Before part salts were
+// recorded in the manifest, a provider could serve either one and the object
+// would read as valid with one part's contents silently replaced by an earlier
+// attempt's.
+//
+// Here the provider does exactly that, with bytes this gateway itself wrote.
+func TestIntegrationRetrySubstitution(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t, "retried.bin")
+	ctx := context.Background()
+
+	first := randomBytes(t, testPart)
+	second := randomBytes(t, testPart)
+	tail := randomBytes(t, 999)
+
+	token := h.mpuStart(t, key, nil)
+
+	// Part 1, first attempt. Its ciphertext is kept aside: this is what the
+	// provider will substitute back in later.
+	etag1a, resp := h.mpuPart(t, key, token, 1, first)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("part 1 attempt A returned %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	_ = etag1a
+
+	// The same part again, with different content -- a retry, as a client that
+	// changed its mind or resumed from a different buffer would produce.
+	etag1b, resp := h.mpuPart(t, key, token, 1, second)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("part 1 attempt B returned %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	etag2, resp := h.mpuPart(t, key, token, 2, tail)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("part 2 returned %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	complete := h.mpuComplete(t, key, token, []completeReqPart{
+		{PartNumber: 1, ETag: etag1b},
+		{PartNumber: 2, ETag: etag2},
+	})
+	if complete.StatusCode != http.StatusOK {
+		t.Fatalf("completion returned %d: %s", complete.StatusCode, readBody(t, complete))
+	}
+	_ = complete.Body.Close()
+
+	whole := append(append([]byte{}, second...), tail...)
+	if got := h.getOK(t, key); got != string(whole) {
+		t.Fatalf("the object does not read back as the second attempt (%d bytes)", len(got))
+	}
+
+	// The provider now replaces part 1's segment with the first attempt's. To
+	// produce those bytes it re-encrypts the same plaintext under the object's
+	// own data key with a *different* salt, which is exactly what the first
+	// attempt was. Everything about it is authentic except which attempt it is.
+	substituted := h.reencryptPart(t, key, 1, first)
+	h.rewriteUpstream(t, key, func(stored []byte) []byte {
+		if len(substituted) > len(stored) {
+			t.Fatalf("the substituted part is longer than the object")
+		}
+		out := append([]byte{}, stored...)
+		copy(out, substituted)
+		return out
+	})
+
+	resp = h.do(t, http.MethodGet, key)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK && string(body) == string(append(append([]byte{}, first...), tail...)) {
+		t.Fatal("the gateway served an earlier attempt at part 1 as though it were the object")
+	}
+	if resp.StatusCode == http.StatusOK && len(body) == len(whole) {
+		t.Fatal("the gateway served a full object after a part was substituted")
+	}
+	_ = ctx
+}
+
+// reencryptPart produces the ciphertext of one part as this gateway would have
+// written it, under the object's own data key and a fresh salt.
+//
+// It stands in for an earlier upload attempt: the gateway wrote one exactly
+// like this, and the provider kept it.
+func (h *harness) reencryptPart(t *testing.T, key string, partNumber uint32, plain []byte) []byte {
+	t.Helper()
+	ctx := context.Background()
+
+	info, err := h.upstream.HeadObject(ctx, testBucket, key)
+	if err != nil {
+		t.Fatalf("HEAD upstream: %v", err)
+	}
+	meta, err := objectmeta.Parse(info.Metadata, stream.MinLog2ChunkSize)
+	if err != nil {
+		t.Fatalf("parsing metadata: %v", err)
+	}
+	aad, err := keys.ObjectAAD(meta.KeyID, testBucket, key)
+	if err != nil {
+		t.Fatalf("ObjectAAD: %v", err)
+	}
+	dek, err := h.keyring.Unwrap(ctx, meta.KeyID, meta.WrappedDEK, aad)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	defer clear(dek)
+
+	var buf bytes.Buffer
+	ew, err := stream.NewEncryptWriter(&buf, dek, stream.SegmentParams{
+		Log2ChunkSize: meta.Log2ChunkSize, Multipart: true, Index: partNumber,
+	})
+	if err != nil {
+		t.Fatalf("NewEncryptWriter: %v", err)
+	}
+	if _, err := ew.Write(plain); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := ew.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return buf.Bytes()
 }

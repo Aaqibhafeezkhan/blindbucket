@@ -397,7 +397,57 @@ func loadParts(ctx context.Context, deps Deps, src Source, dek []byte) ([]manife
 	if err != nil {
 		return nil, err
 	}
-	return m.Parts, nil
+	if m.HasSalts() {
+		return m.Parts, nil
+	}
+
+	// A manifest written before part salts were recorded. The destination's
+	// will be written in the current format, and writing zero salts into it
+	// would produce an object that fails its own verification on the first
+	// read. The salts are recoverable here in a way they are not at
+	// completion: the source is a finished object, so its part headers can be
+	// read. Copying and rotation therefore upgrade an old object rather than
+	// carrying its gap forward.
+	return fillSaltsFromHeaders(ctx, deps, src, m.Parts)
+}
+
+// fillSaltsFromHeaders reads each part's segment header off the source object.
+func fillSaltsFromHeaders(
+	ctx context.Context, deps Deps, src Source, parts []manifest.Part,
+) ([]manifest.Part, error) {
+	out := make([]manifest.Part, len(parts))
+	copy(out, parts)
+
+	var offset int64
+	for i, part := range out {
+		sealed, err := stream.SealedSize(part.PlainSize, src.Meta.Log2ChunkSize)
+		if err != nil {
+			return nil, fmt.Errorf("part %d has an impossible size: %w", part.Number, err)
+		}
+		got, err := deps.Upstream.GetObject(ctx, upstream.GetObjectInput{
+			Bucket: src.Bucket, Key: src.Key,
+			Range:   fmt.Sprintf("bytes=%d-%d", offset, offset+stream.HeaderSize-1),
+			IfMatch: src.Info.ETag,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reading the header of part %d: %w", part.Number, err)
+		}
+		raw := make([]byte, stream.HeaderSize)
+		_, readErr := io.ReadFull(got.Body, raw)
+		_ = got.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("reading the header of part %d: %w", part.Number, readErr)
+		}
+		salt, ok := stream.SaltFromHeader(raw)
+		if !ok {
+			return nil, fmt.Errorf("the header of part %d is short", part.Number)
+		}
+		out[i].Salt = salt
+		offset += sealed
+	}
+	deps.Log.Info("upgraded a manifest written before part salts were recorded",
+		"bucket", src.Bucket, "key", src.Key, "parts", len(out))
+	return out, nil
 }
 
 // writeManifest stores the manifest of the destination object.

@@ -398,7 +398,7 @@ flag clear and segment index `0`.
 
 ---
 
-## 10. Multipart manifest (`BBM1`)
+## 10. Multipart manifest (`BBM2`)
 
 A multipart object is the concatenation of one segment per part. Each segment is
 authenticated on its own, but nothing in the segments states how many there are, so
@@ -406,12 +406,24 @@ a provider could serve an object with parts missing and every remaining tag woul
 still verify. The manifest is what binds the parts into one object.
 
 ```
-Manifest = "BBM1" || lp(bucket) || lp(key) || ManifestID(16) || uint16_be(M)
-           || { uint16_be(part number) || uint64_be(plaintext size) } × M
+Manifest = "BBM2" || lp(bucket) || lp(key) || ManifestID(16) || uint16_be(M)
+           || { uint16_be(part number) || uint64_be(plaintext size) || Salt(20) } × M
            || HMAC-SHA256(ManifestKey, all preceding bytes)
 ```
 
 `ManifestKey = HKDF-SHA256(ikm=DEK, salt="", info="blindbucket/v1/manifest", L=32)`.
+
+The `Salt` of each entry is the salt in that part's segment header (§4.1). It
+names **which attempt** at that part number the object was completed from. A
+client that retries a part leaves two segments under one number, both authentic
+and both the same size, and without this a provider could serve either — see
+§10.6.
+
+`"BBM1"` is the same structure with the `Salt` field absent. A decoder MUST
+accept it, MUST treat its parts as carrying no salt, and MUST NOT compare an
+absent salt against anything. Objects written under it keep the residual risk
+of §10.6; copying or rotating such an object rewrites its manifest as `BBM2`,
+recovering the salts from the stored segment headers.
 
 ### 10.1 Placement
 
@@ -437,6 +449,10 @@ could make its own object unreadable.
   S3 allows parts 1, 5, 9, and the manifest records what was assembled.
 - Part sizes are plaintext sizes and MUST satisfy §7.3.
 - A decoder MUST reject a manifest with trailing bytes.
+- In a `BBM2` manifest every entry carries exactly 20 salt bytes. They are not
+  required to differ from one another: two parts of one object may legitimately
+  share a salt, because each segment's subkey is also separated by its part
+  number in the nonce.
 
 ### 10.3 Verification
 
@@ -459,15 +475,49 @@ manifest from an earlier upload of the same key does not verify.
 3. Compute each part's ciphertext size with §7.1 and check that the sizes sum to
    the object's stored size. A mismatch MUST be an error.
 4. Decrypt the segments in order. Each segment MUST carry the multipart flag and a
-   segment index equal to its part number in the manifest.
+   segment index equal to its part number in the manifest, and — for a `BBM2`
+   manifest — a salt equal to that entry's `Salt`.
 
-Step 4 is what catches reordering, and step 3 what catches a dropped part.
+Step 4 is what catches reordering, substitution of another attempt (§10.6), and
+step 3 what catches a dropped part.
+
+The salt MUST be checked when the part's header is read, before any plaintext of
+that part is released. It is not a check that can be deferred to the end of the
+part: by then the plaintext is already out.
 
 A provider that removes `bb-mid` to present a multipart object as a single-part one
 is caught at the first segment header: the multipart flag is set and it is
 authenticated.
 
-### 10.5 Lifecycle
+### 10.5 Learning the salts at completion
+
+A part of an open multipart upload cannot be read back — it is not an object
+until the upload completes — and the manifest must exist before the object does
+(§10.7). An implementation therefore cannot obtain the salts by reading the
+parts it is about to assemble.
+
+The salt is instead carried by the ETag the implementation answers an
+`UploadPart` with, which the client echoes back at completion exactly as S3
+requires. This document does not prescribe the encoding; blindbucket appends
+`"." || base64url(AEAD(salt))` to the provider's own ETag, keyed off the KEK and
+bound to the part number, so that a tag returned for the wrong part is refused
+rather than recorded.
+
+An implementation that cannot do this MAY write `BBM1` manifests, accepting
+§10.6.
+
+### 10.6 Retry substitution
+
+Within one upload, a provider may hold several attempts at the same part number.
+Every one of them is a valid segment: the part number is authenticated and
+equal, the sizes are equal, and each chunk tag verifies under the object's DEK.
+Nothing but the salt tells them apart.
+
+A `BBM2` manifest names the attempt, so serving another one is detected at that
+part's header. A `BBM1` manifest does not, and for objects written under it this
+remains an accepted risk.
+
+### 10.7 Lifecycle
 
 Which manifests may be written and deleted, and in what order, is normative and is
 specified in `CONCEPT.md` §10.8 as rules R1–R4. The rules are model-checked in

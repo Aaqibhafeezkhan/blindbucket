@@ -22,8 +22,9 @@ const (
 	IDSize = 16
 	// MACSize is the length of the trailing HMAC-SHA256.
 	MACSize = 32
-	// entrySize is the on-wire size of one part entry: uint16 number, uint64 size.
-	entrySize = 10
+	// entrySize is the on-wire size of one BBM2 part entry: uint16 number,
+	// uint64 size, and the part's segment salt.
+	entrySize = 10 + stream.SaltSize
 	// macKeyInfo domain-separates the manifest key from every other key derived
 	// from a DEK.
 	macKeyInfo = "blindbucket/v1/manifest"
@@ -31,8 +32,21 @@ const (
 	Prefix = ".blindbucket/m/"
 )
 
-// Magic is the four-byte marker every manifest starts with.
-var Magic = [4]byte{'B', 'B', 'M', '1'}
+// Magic is the four-byte marker a manifest written by this build starts with.
+//
+// BBM2 differs from BBM1 in one field: each part entry carries the salt of that
+// part's segment. That is what pins a manifest to the exact segments it was
+// completed from, rather than to a shape any segment of the right size could
+// fill -- see MagicV1 and docs/FORMAT.md section 10.
+var Magic = [4]byte{'B', 'B', 'M', '2'}
+
+// MagicV1 marks a manifest written before part salts were recorded.
+//
+// Those are still read: objects written under it are not rewritten, and
+// refusing them would make an upgrade lose data. What they cannot do is detect
+// retry substitution (THREAT_MODEL section 5.2), because they do not say which
+// attempt at a part they were completed from. HasSalts reports the difference.
+var MagicV1 = [4]byte{'B', 'B', 'M', '1'}
 
 // ErrVerify reports a manifest that failed authentication or does not describe
 // the object it was loaded for.
@@ -103,6 +117,14 @@ type Part struct {
 	Number uint32
 	// PlainSize is the part's plaintext size in bytes.
 	PlainSize int64
+	// Salt is the salt of that part's segment header.
+	//
+	// It names which *attempt* at this part number the object was completed
+	// from. A client that retries a part produces a second valid segment under
+	// the same number, and without this a provider could serve either one and
+	// every tag would still verify (THREAT_MODEL section 5.2). Zero in a
+	// manifest read from BBM1, where it was not recorded.
+	Salt [stream.SaltSize]byte
 }
 
 // Manifest is the authenticated part list of a multipart object.
@@ -117,7 +139,17 @@ type Manifest struct {
 	Key    string
 	ID     ID
 	Parts  []Part
+	// legacy reports that this manifest was read from a BBM1 file and carries
+	// no part salts. It is not set on manifests this build writes.
+	legacy bool
 }
+
+// HasSalts reports whether the manifest pins each part to a specific segment.
+//
+// False only for a manifest written before BBM2. A reader must not treat a
+// zero salt as a salt to compare against -- that would reject every object
+// written by an older build.
+func (m *Manifest) HasSalts() bool { return !m.legacy }
 
 // PlainSize returns the total plaintext size of the object.
 func (m *Manifest) PlainSize() int64 {
@@ -165,6 +197,7 @@ func (m *Manifest) Marshal(dek []byte) ([]byte, error) {
 		out = binary.BigEndian.AppendUint16(out, uint16(p.Number))
 		//nolint:gosec // validate rejects negative sizes.
 		out = binary.BigEndian.AppendUint64(out, uint64(p.PlainSize))
+		out = append(out, p.Salt[:]...)
 	}
 
 	mac := hmac.New(sha256.New, key)
@@ -217,8 +250,16 @@ func Unmarshal(raw, dek []byte, bucket, key string, id ID) (*Manifest, error) {
 func parseBody(body []byte) (*Manifest, error) {
 	r := &reader{buf: body}
 	magic, ok := r.next(len(Magic))
-	if !ok || [4]byte(magic) != Magic {
-		return nil, fmt.Errorf("%w: not a BBM1 manifest", ErrVerify)
+	if !ok {
+		return nil, fmt.Errorf("%w: truncated magic", ErrVerify)
+	}
+	var legacy bool
+	switch [4]byte(magic) {
+	case Magic:
+	case MagicV1:
+		legacy = true
+	default:
+		return nil, fmt.Errorf("%w: not a blindbucket manifest", ErrVerify)
 	}
 	bucket, ok := r.lp()
 	if !ok {
@@ -237,7 +278,7 @@ func parseBody(body []byte) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: truncated part count", ErrVerify)
 	}
 
-	m := &Manifest{Bucket: bucket, Key: key, Parts: make([]Part, 0, count)}
+	m := &Manifest{Bucket: bucket, Key: key, Parts: make([]Part, 0, count), legacy: legacy}
 	copy(m.ID[:], rawID)
 	for range count {
 		number, ok1 := r.uint16()
@@ -249,7 +290,15 @@ func parseBody(body []byte) (*Manifest, error) {
 			return nil, fmt.Errorf("%w: part %d claims %d bytes", ErrVerify, number, size)
 		}
 		//nolint:gosec // bounded immediately above.
-		m.Parts = append(m.Parts, Part{Number: uint32(number), PlainSize: int64(size)})
+		part := Part{Number: uint32(number), PlainSize: int64(size)}
+		if !legacy {
+			salt, ok := r.next(stream.SaltSize)
+			if !ok {
+				return nil, fmt.Errorf("%w: truncated part list", ErrVerify)
+			}
+			copy(part.Salt[:], salt)
+		}
+		m.Parts = append(m.Parts, part)
 	}
 	if r.remaining() != 0 {
 		return nil, fmt.Errorf("%w: %d trailing bytes", ErrVerify, r.remaining())

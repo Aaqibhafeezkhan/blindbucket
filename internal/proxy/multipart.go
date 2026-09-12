@@ -202,6 +202,10 @@ func (p *Proxy) uploadPart(
 
 	pr, pw := io.Pipe()
 	encDone := make(chan error, 1)
+	// The salt is generated inside the writer and is needed after the upload,
+	// to seal into the ETag. It is published through a channel rather than a
+	// shared variable so that the race detector has something to check.
+	saltCh := make(chan [stream.SaltSize]byte, 1)
 	go func() {
 		ew, err := stream.NewEncryptWriter(pw, dek, stream.SegmentParams{
 			Log2ChunkSize: p.log2C,
@@ -210,10 +214,12 @@ func (p *Proxy) uploadPart(
 			Index: uint32(req.PartNumber),
 		})
 		if err != nil {
+			close(saltCh)
 			_ = pw.CloseWithError(err)
 			encDone <- err
 			return
 		}
+		saltCh <- ew.Salt()
 		_, copyErr := io.Copy(ew, guardedReader{src: body, guard: guard})
 		if copyErr == nil {
 			copyErr = ew.Close()
@@ -256,10 +262,24 @@ func (p *Proxy) uploadPart(
 		return translateUpstream(putErr)
 	}
 
-	// The ETag is the provider's, over the ciphertext, and the client hands it
-	// straight back at completion. It is deliberately not an MD5 of the
-	// plaintext: there is none to offer without buffering the part.
-	w.Header().Set("ETag", etag)
+	// The ETag is the provider's, over the ciphertext, with the salt of this
+	// attempt sealed onto it. The client hands it straight back at completion,
+	// which is the only way a stateless gateway can learn which attempt at this
+	// part number the object ends up being completed from -- a part of an open
+	// upload cannot be read back (THREAT_MODEL 5.2, internal/upload/parttag.go).
+	//
+	// It is deliberately not an MD5 of the plaintext: there is none to offer
+	// without buffering the part.
+	salt, ok := <-saltCh
+	if !ok {
+		return s3api.ErrInternal
+	}
+	tagged, err := upload.SealPartTag(r.Context(), p.keys, token.KID, etag, req.PartNumber, salt)
+	if err != nil {
+		log.Error("sealing the part tag failed", "part", req.PartNumber, "err", err)
+		return s3api.ErrInternal
+	}
+	w.Header().Set("ETag", tagged)
 	echoVerifiedChecksums(w.Header(), r.Header, body.Trailer())
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(http.StatusOK)
@@ -309,7 +329,7 @@ func (p *Proxy) completeMultipartUpload(
 		}
 		return translateUpstream(err)
 	}
-	uploaded, apiErr := matchParts(requested, stored)
+	uploaded, apiErr := p.matchParts(r, token, requested, stored)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -342,10 +362,13 @@ func (p *Proxy) completeMultipartUpload(
 	p.at(hookUpManifest, req)
 
 	// Step 4: the object becomes visible.
-	completed := make([]upstream.CompletedPart, 0, len(requested))
-	for _, part := range requested {
+	// The provider's own ETags, from ListParts -- not the decorated ones the
+	// client echoed, which the provider has never seen.
+	completed := make([]upstream.CompletedPart, 0, len(uploaded))
+	for _, part := range uploaded {
 		completed = append(completed, upstream.CompletedPart{
-			PartNumber: part.PartNumber, ETag: part.ETag,
+			//nolint:gosec // bounded by the router and by S3.
+			PartNumber: int(part.Number), ETag: part.ETag,
 		})
 	}
 	out, err := p.upstream.CompleteMultipartUpload(r.Context(), upstream.CompleteMultipartUploadInput{
@@ -525,7 +548,9 @@ func readCompleteRequest(r *http.Request) ([]completeReqPart, *s3api.Error) {
 // sizes, and a client that could name them could make an object list at any size
 // it liked. The client's list still decides *which* parts are assembled and in
 // what order, because that is what it will send to the provider.
-func matchParts(requested []completeReqPart, stored []upstream.Part) ([]manifest.UploadedPart, *s3api.Error) {
+func (p *Proxy) matchParts(
+	r *http.Request, token *upload.Token, requested []completeReqPart, stored []upstream.Part,
+) ([]manifest.UploadedPart, *s3api.Error) {
 	sizes := make(map[int]upstream.Part, len(stored))
 	for _, part := range stored {
 		sizes[part.PartNumber] = part
@@ -544,9 +569,22 @@ func matchParts(requested []completeReqPart, stored []upstream.Part) ([]manifest
 			return nil, s3api.ErrInvalidPart.WithMessage(
 				"part %d was never uploaded for this upload id", want.PartNumber)
 		}
+
+		// The client's ETag carries the salt of the attempt it means. Which
+		// attempt matters: a retried part leaves two valid segments under one
+		// number, and the manifest has to name the one being completed.
+		_, salt, err := upload.OpenPartTag(
+			r.Context(), p.keys, token.KID, want.ETag, want.PartNumber)
+		if err != nil {
+			return nil, s3api.ErrInvalidPart.WithMessage(
+				"the ETag returned for part %d is not the one this gateway issued for it",
+				want.PartNumber)
+		}
+
 		//nolint:gosec // part numbers are bounded by the router and by S3 itself.
 		out = append(out, manifest.UploadedPart{
-			Number: uint32(want.PartNumber), CipherSize: have.Size, ETag: have.ETag,
+			Number: uint32(want.PartNumber), CipherSize: have.Size,
+			ETag: have.ETag, Salt: salt,
 		})
 	}
 	return out, nil

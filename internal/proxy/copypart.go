@@ -15,6 +15,7 @@ import (
 	"github.com/LennardGeissler/blindbucket/internal/manifest"
 	"github.com/LennardGeissler/blindbucket/internal/obs"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
+	"github.com/LennardGeissler/blindbucket/internal/upload"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
 
@@ -101,6 +102,10 @@ func (p *Proxy) uploadPartCopy(
 	// request reads, so nothing is buffered beyond a chunk.
 	pr, pw := io.Pipe()
 	encDone := make(chan error, 1)
+	// Like uploadPart: the salt is generated inside the writer and has to reach
+	// the ETag, because that is how the completion learns which attempt this
+	// part is (internal/upload/parttag.go).
+	saltCh := make(chan [stream.SaltSize]byte, 1)
 	go func() {
 		ew, err := stream.NewEncryptWriter(pw, destDEK, stream.SegmentParams{
 			Log2ChunkSize: p.log2C,
@@ -109,10 +114,12 @@ func (p *Proxy) uploadPartCopy(
 			Index: uint32(req.PartNumber),
 		})
 		if err != nil {
+			close(saltCh)
 			_ = pw.CloseWithError(err)
 			encDone <- err
 			return
 		}
+		saltCh <- ew.Salt()
 		_, copyErr := io.Copy(ew, reader)
 		if copyErr == nil {
 			copyErr = ew.Close()
@@ -148,13 +155,23 @@ func (p *Proxy) uploadPartCopy(
 		return translateUpstream(putErr)
 	}
 
+	salt, ok := <-saltCh
+	if !ok {
+		return s3api.ErrInternal
+	}
+	tagged, err := upload.SealPartTag(r.Context(), p.keys, token.KID, etag, req.PartNumber, salt)
+	if err != nil {
+		log.Error("sealing the part tag failed", "part", req.PartNumber, "err", err)
+		return s3api.ErrInternal
+	}
+
 	p.metrics.Bytes(obs.OutCipher, sealedLen)
 	log.Info("part copied", "part", req.PartNumber,
 		"source_bucket", src.Bucket, "source_key", src.Key,
 		"plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen)
 
 	return writeXML(w, http.StatusOK, copyPartResult{
-		ETag:         etag,
+		ETag:         tagged,
 		LastModified: time.Now().UTC().Format(time.RFC3339),
 	})
 }

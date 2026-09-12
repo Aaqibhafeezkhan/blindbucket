@@ -111,13 +111,26 @@ Detecting this requires an external, authenticated index of versions, which woul
 reintroduce the shared mutable state that the stateless design avoids (ADR-002). Mitigation
 is deferred to M6 and is currently **accepted risk**.
 
-### 5.2 Retry substitution within a multipart upload
+### 5.2 Retry substitution within a multipart upload — mitigated
 
 Within one upload, an active provider could substitute part *n* with the bytes of an earlier
-transmission attempt of the same part *n*. Both are valid segments produced by the proxy.
-In practice clients resend identical content on retry, so this is usually inconsequential.
-Planned mitigation (M6): record part ETags in the manifest and verify the ciphertext MD5 per
-part on full reads.
+transmission attempt of the same part *n*. Both are valid segments produced by the proxy:
+the part number is authenticated and equal, the sizes are equal, every chunk tag verifies.
+
+**This is now detected.** The manifest records each part's segment salt, which FORMAT.md
+§4.1 already required to be fresh per attempt, and a reader compares it against the
+authenticated header before releasing any plaintext of that part
+([ADR-014](adr/ADR-014-part-salts-in-the-manifest.md), FORMAT.md §10.6). The salt is
+associated data of every chunk, so a provider cannot forge one — it can only substitute a
+whole genuine segment, which is exactly what the comparison catches.
+
+Two things about it are worth stating rather than leaving implied. The planned mitigation
+was part ETags verified as a ciphertext MD5 on read; that was dropped because it hashes
+every byte read and only detects *after* the part has been delivered, which is the
+unsatisfactory pattern of §5.3. And objects written before the manifest recorded salts
+(`BBM1`) keep the original risk: there is nothing in them to compare against. Copying or
+rotating such an object rewrites its manifest and closes the gap, because a finished
+object's part headers, unlike an open upload's, can be read.
 
 ### 5.3 Partially delivered plaintext
 

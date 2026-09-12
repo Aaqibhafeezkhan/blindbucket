@@ -525,8 +525,10 @@ exact multiple of the chunk size. That is now spelled out in the format spec.
 Every guarantee is backed by tests that play an actively hostile storage provider and
 require an error rather than plaintext: every single-bit flip across all 32 header bytes,
 tampered chunk data and tags, swapped and duplicated chunks, truncation at and inside chunk
-boundaries, appended bytes, forged chunk sizes, and multipart segments served under the
-wrong part number. A fuzz target additionally requires that anything the decoder accepts
+boundaries, appended bytes, forged chunk sizes, multipart segments served under the wrong
+part number, and a part replaced by an earlier upload attempt of the same part — bytes this
+gateway itself wrote, which authenticate perfectly and are still the wrong ones
+([ADR-014](docs/adr/ADR-014-part-salts-in-the-manifest.md)). A fuzz target additionally requires that anything the decoder accepts
 re-encrypts to the identical bytes, which rules out two ciphertexts decoding to one
 plaintext.
 

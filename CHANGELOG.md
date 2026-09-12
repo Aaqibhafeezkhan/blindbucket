@@ -51,6 +51,28 @@ Both clients are hand-written against the services' HTTP APIs, so Vault adds no
 dependency and KMS reuses the SigV4 signer already there
 ([ADR-013](docs/adr/ADR-013-root-key-sources.md)).
 
+**Part salts in the manifest**, closing the last residual risk that had a
+planned mitigation (THREAT_MODEL §5.2). A client that retries a part leaves two
+valid segments under one part number — same number, same size, every tag
+verifying — and the manifest could not say which of them the object was
+completed from, so a provider could serve either. It now records each part's
+segment salt, which the format already required to be fresh per attempt, and a
+reader checks it against the authenticated header *before* releasing any
+plaintext of that part.
+
+Getting the salt to the completion is the interesting half: a part of an open
+upload cannot be read back, so the gateway cannot look. It travels with the
+client instead, sealed into the part ETag that S3 has the client echo back —
+the upload token's trick, one level down. Part ETags are therefore no longer
+plain hex; the AWS CLI, boto3, `mc` and rclone were each measured accepting and
+returning them unchanged ([ADR-014](docs/adr/ADR-014-part-salts-in-the-manifest.md)).
+
+The manifest format moves to `BBM2`. `BBM1` manifests are still read, and
+objects written under them keep the original risk — there is nothing in them to
+compare against. Copying or rotating such an object rewrites its manifest and
+closes the gap, because a finished object's headers can be read where an open
+upload's cannot.
+
 ### Changed
 
 **Object tags are refused rather than ignored.** `PutObjectTagging`,
