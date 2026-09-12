@@ -8,17 +8,23 @@ import (
 	"os"
 	"time"
 
+	"github.com/LennardGeissler/blindbucket/internal/config"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 )
 
-func runKeygen(_ context.Context, args []string) error {
+func runKeygen(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), `Usage: blindbucket keygen --out <file> [flags]
 
-Creates a keyring holding one key-encryption key, protected by a passphrase
-stretched with Argon2id. Without --add, an existing file is never overwritten:
-losing a keyring means losing every object encrypted under it.
+Creates a keyring holding one key-encryption key. By default the root key that
+protects it is an Argon2id stretch of a passphrase. With --config naming a
+configuration whose keys.provider is "vault" or "awskms", the root key is
+random and sealed by that service instead, and the keyring records which one --
+so opening it later needs the service, not a passphrase.
+
+Without --add, an existing file is never overwritten: losing a keyring means
+losing every object encrypted under it.
 
 Flags:
 `)
@@ -30,6 +36,8 @@ Flags:
 		kid  = fs.String("kid", defaultKID(), "id of the key to create")
 		add  = fs.Bool("add", false, "add a key to an existing keyring instead of creating one")
 		act  = fs.Bool("activate", true, "with --add, make the new key the active one")
+		conf = fs.String("config", "",
+			"configuration file naming the root-key provider (default: a passphrase)")
 		pass passphraseFlags
 	)
 	pass.register(fs)
@@ -44,13 +52,75 @@ Flags:
 		return err
 	}
 
-	if *add {
-		return addKey(*out, *kid, *act, &pass)
+	keysCfg := config.Keys{Provider: "file"}
+	if *conf != "" {
+		cfg, err := config.Load(*conf)
+		if err != nil {
+			return err
+		}
+		keysCfg = cfg.Keys
+		if pass.file == "" {
+			pass.file = keysCfg.PassphraseFile
+		}
 	}
-	return createKeyring(*out, *kid, &pass)
+
+	if *add {
+		return addKey(ctx, *out, *kid, *act, keysCfg, &pass)
+	}
+	return createKeyring(ctx, *out, *kid, keysCfg, &pass)
 }
 
-func createKeyring(path, kid string, pass *passphraseFlags) error {
+// sealKeyring writes a keyring under whichever root key the configuration names.
+//
+// The passphrase path and the service path differ only in where the root key
+// comes from: Argon2id over something the operator knows, or 32 random bytes
+// the service will hand back. What they protect, and how, is identical.
+func sealKeyring(
+	ctx context.Context, ring *keys.Keyring, cfg config.Keys, pass *passphraseFlags, confirm bool,
+) ([]byte, error) {
+	source, err := newRootKeySource(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		phrase, err := pass.resolve("Passphrase for the keyring: ", confirm)
+		if err != nil {
+			return nil, err
+		}
+		defer clear(phrase)
+		return ring.Marshal(phrase, keys.DefaultKDFParams)
+	}
+
+	root, err := keys.NewRootKey()
+	if err != nil {
+		return nil, err
+	}
+	defer clear(root)
+
+	ciphertext, err := source.Encrypt(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	return ring.MarshalWithRootKey(root, rootKeyRefFor(cfg, ciphertext))
+}
+
+// rootKeyRefFor records what has to be asked to get the root key back.
+func rootKeyRefFor(cfg config.Keys, ciphertext string) keys.RootKeyRef {
+	switch cfg.Provider {
+	case "vault":
+		return keys.RootKeyRef{
+			Source: keys.SourceVaultTransit, Ciphertext: ciphertext, KeyName: cfg.Vault.KeyName,
+		}
+	default:
+		return keys.RootKeyRef{
+			Source: keys.SourceAWSKMS, Ciphertext: ciphertext, KeyName: cfg.AWSKMS.KeyID,
+		}
+	}
+}
+
+func createKeyring(
+	ctx context.Context, path, kid string, cfg config.Keys, pass *passphraseFlags,
+) error {
 	// Refuse to clobber. A keyring is the only copy of the keys protecting every
 	// object written under it; overwriting one is not recoverable.
 	if _, err := os.Stat(path); err == nil {
@@ -59,17 +129,11 @@ func createKeyring(path, kid string, pass *passphraseFlags) error {
 		return err
 	}
 
-	phrase, err := pass.resolve("Passphrase for the new keyring: ", true)
-	if err != nil {
-		return err
-	}
-	defer clear(phrase)
-
 	ring := keys.NewKeyring()
 	if err := ring.Generate(kid); err != nil {
 		return err
 	}
-	data, err := ring.Marshal(phrase, keys.DefaultKDFParams)
+	data, err := sealKeyring(ctx, ring, cfg, pass, true)
 	if err != nil {
 		return err
 	}
@@ -77,23 +141,27 @@ func createKeyring(path, kid string, pass *passphraseFlags) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "wrote %s with key %q (active)\n", path, kid)
+	fmt.Fprintf(os.Stderr, "wrote %s with key %q (active), sealed by %s\n",
+		path, kid, sealedBy(cfg))
 	return nil
 }
 
-func addKey(path, kid string, activate bool, pass *passphraseFlags) error {
-	//nolint:gosec // the path is a command-line argument.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
+// sealedBy names the root-key source for the operator's confirmation line.
+func sealedBy(cfg config.Keys) string {
+	switch cfg.Provider {
+	case "vault":
+		return "Vault Transit key " + cfg.Vault.KeyName
+	case "awskms":
+		return "AWS KMS key " + cfg.AWSKMS.KeyID
+	default:
+		return "a passphrase"
 	}
-	phrase, err := pass.resolve("Passphrase for "+path+": ", false)
-	if err != nil {
-		return err
-	}
-	defer clear(phrase)
+}
 
-	ring, err := keys.LoadKeyring(data, phrase)
+func addKey(
+	ctx context.Context, path, kid string, activate bool, cfg config.Keys, pass *passphraseFlags,
+) error {
+	ring, err := openKeyring(ctx, path, cfg, pass)
 	if err != nil {
 		return err
 	}
@@ -106,7 +174,10 @@ func addKey(path, kid string, activate bool, pass *passphraseFlags) error {
 		}
 	}
 
-	updated, err := ring.Marshal(phrase, keys.DefaultKDFParams)
+	// Re-sealed rather than patched: a new root key on every write means a
+	// keyring that is added to does not accumulate ciphertext under one key
+	// forever, and for the passphrase case it re-runs the KDF with a new salt.
+	updated, err := sealKeyring(ctx, ring, cfg, pass, false)
 	if err != nil {
 		return err
 	}

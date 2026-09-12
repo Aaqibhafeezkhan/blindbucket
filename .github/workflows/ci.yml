@@ -154,6 +154,62 @@ jobs:
         if: failure()
         run: docker logs minio
 
+  keyservices:
+    name: Root-key sources (Vault, KMS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Vault in dev mode: a fixed root token, no storage, gone with the runner.
+      # None of this is a secret, and the alternative -- mocking the HTTP API --
+      # would only assert what the code already believes about it.
+      - name: Start Vault and create the transit key
+        run: |
+          docker run -d --name vault --cap-add IPC_LOCK -p 8200:8200 \
+            -e VAULT_DEV_ROOT_TOKEN_ID=blindbucket-dev-token \
+            -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+            hashicorp/vault:latest
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8200/v1/sys/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf -X POST -H "X-Vault-Token: blindbucket-dev-token" \
+            -d '{"type":"transit"}' http://localhost:8200/v1/sys/mounts/transit
+          curl -sf -X POST -H "X-Vault-Token: blindbucket-dev-token" \
+            -d '{}' http://localhost:8200/v1/transit/keys/blindbucket
+
+      # An emulator of the KMS protocol, not AWS. What this job establishes is
+      # that the client speaks KMS correctly; docs/COMPATIBILITY.md says so
+      # rather than claiming the service was tested.
+      - name: Start the KMS emulator
+        run: |
+          docker run -d --name kms -p 4599:8080 \
+            -e PORT=8080 -e KMS_REGION=us-east-1 \
+            nsmithuk/local-kms:latest
+          for _ in $(seq 1 30); do
+            if curl -sf -o /dev/null -X POST http://localhost:4599/ \
+              -H "X-Amz-Target: TrentService.CreateKey" \
+              -H "Content-Type: application/x-amz-json-1.1" -d '{}'; then break; fi
+            sleep 1
+          done
+
+      - name: Run the root-key tests
+        env:
+          BLINDBUCKET_TEST_VAULT_ADDR: http://localhost:8200
+          BLINDBUCKET_TEST_VAULT_TOKEN: blindbucket-dev-token
+          BLINDBUCKET_TEST_KMS_ENDPOINT: http://localhost:4599
+        run: go test -race -count=1 ./internal/rootkey/...
+
+      - name: Service logs on failure
+        if: failure()
+        run: |
+          docker logs vault || true
+          docker logs kms || true
+
   clients:
     name: Client compatibility (AWS CLI, boto3)
     runs-on: ubuntu-latest

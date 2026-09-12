@@ -207,10 +207,17 @@ func (p KDFParams) deriveRootKey(passphrase []byte) ([]byte, error) {
 // keyringFile is the on-disk representation. Only wrapped key material appears
 // in it; the root key exists solely in memory, derived from the passphrase.
 type keyringFile struct {
-	Version   int        `json:"version"`
-	ActiveKID string     `json:"active_kid"`
-	KDF       KDFParams  `json:"kdf"`
-	Keys      []keyEntry `json:"keys"`
+	Version   int    `json:"version"`
+	ActiveKID string `json:"active_kid"`
+	// RootKey says where the root key comes from. Absent in files written
+	// before service-backed sources existed, which are passphrase keyrings --
+	// that is what KDF below is for, and it is written only for those.
+	RootKey RootKeyRef `json:"root_key,omitempty"`
+	// A pointer, so a service-sealed keyring omits it entirely rather than
+	// carrying a zeroed Argon2id block it can never use: encoding/json's
+	// omitempty does nothing for a struct value.
+	KDF  *KDFParams `json:"kdf,omitempty"`
+	Keys []keyEntry `json:"keys"`
 }
 
 type keyEntry struct {
@@ -240,13 +247,36 @@ func (r *Keyring) Marshal(passphrase []byte, params KDFParams) ([]byte, error) {
 	}
 	defer clear(rootKey)
 
+	return r.marshal(rootKey, RootKeyRef{Source: SourcePassphrase}, &params)
+}
+
+// MarshalWithRootKey renders the keyring under a root key held elsewhere.
+//
+// ref records what has to be asked to get that key back, and is written into
+// the file. The caller owns rootKey and should wipe it.
+func (r *Keyring) MarshalWithRootKey(rootKey []byte, ref RootKeyRef) ([]byte, error) {
+	if len(rootKey) != KeySize {
+		return nil, fmt.Errorf("keys: root key is %d bytes, want %d", len(rootKey), KeySize)
+	}
+	if err := ref.validate(); err != nil {
+		return nil, err
+	}
+	if ref.Source == SourcePassphrase || ref.Source == "" {
+		return nil, fmt.Errorf("keys: MarshalWithRootKey needs a service-backed source")
+	}
+	return r.marshal(rootKey, ref, nil)
+}
+
+func (r *Keyring) marshal(rootKey []byte, ref RootKeyRef, params *KDFParams) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.active == "" {
 		return nil, fmt.Errorf("keys: refusing to write an empty keyring")
 	}
 
-	file := keyringFile{Version: keyringVersion, ActiveKID: r.active, KDF: params}
+	file := keyringFile{
+		Version: keyringVersion, ActiveKID: r.active, RootKey: ref, KDF: params,
+	}
 	for _, kid := range sortedKeys(r.keks) {
 		aad, err := kekAAD(kid)
 		if err != nil {
@@ -271,28 +301,65 @@ func (r *Keyring) Marshal(passphrase []byte, params KDFParams) ([]byte, error) {
 	return append(out, '\n'), nil
 }
 
+// parseKeyringFile decodes and version-checks a keyring file.
+func parseKeyringFile(data []byte) (keyringFile, error) {
+	var file keyringFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return keyringFile{}, fmt.Errorf("keys: keyring is not valid JSON: %w", err)
+	}
+	if file.Version != keyringVersion {
+		return keyringFile{}, fmt.Errorf("keys: keyring version %d, this build supports %d",
+			file.Version, keyringVersion)
+	}
+	if len(file.Keys) == 0 {
+		return keyringFile{}, fmt.Errorf("keys: keyring contains no keys")
+	}
+	return file, nil
+}
+
 // LoadKeyring parses a keyring file and unwraps its KEKs with passphrase.
 //
 // The key id is authenticated as associated data, so an attacker who reorders or
 // relabels entries in the file cannot make a KEK load under a different id.
 func LoadKeyring(data, passphrase []byte) (*Keyring, error) {
-	var file keyringFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("keys: keyring is not valid JSON: %w", err)
+	file, err := parseKeyringFile(data)
+	if err != nil {
+		return nil, err
 	}
-	if file.Version != keyringVersion {
-		return nil, fmt.Errorf("keys: keyring version %d, this build supports %d", file.Version, keyringVersion)
-	}
-	if len(file.Keys) == 0 {
-		return nil, fmt.Errorf("keys: keyring contains no keys")
+	if src := file.RootKey.Source; src != "" && src != SourcePassphrase {
+		return nil, fmt.Errorf(
+			"keys: this keyring's root key comes from %s, not from a passphrase", src)
 	}
 
+	if file.KDF == nil {
+		return nil, fmt.Errorf("keys: this keyring records no KDF parameters")
+	}
 	rootKey, err := file.KDF.deriveRootKey(passphrase)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(rootKey)
+	return openKeyring(file, rootKey, "wrong passphrase, or the keyring was modified")
+}
 
+// LoadKeyringWithRootKey unwraps a keyring whose root key came from elsewhere.
+//
+// It is the same operation as LoadKeyring past the KDF: Vault and KMS replace
+// how the root key is obtained, not what it protects or how. The caller owns
+// rootKey and should wipe it.
+func LoadKeyringWithRootKey(data, rootKey []byte) (*Keyring, error) {
+	file, err := parseKeyringFile(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(rootKey) != KeySize {
+		return nil, fmt.Errorf("keys: root key is %d bytes, want %d", len(rootKey), KeySize)
+	}
+	return openKeyring(file, rootKey, "the root key does not open this keyring")
+}
+
+// openKeyring unwraps every KEK in a parsed file under rootKey.
+func openKeyring(file keyringFile, rootKey []byte, wrongKeyHint string) (*Keyring, error) {
 	ring := NewKeyring()
 	for _, entry := range file.Keys {
 		aad, err := kekAAD(entry.KID)
@@ -305,7 +372,7 @@ func LoadKeyring(data, passphrase []byte) (*Keyring, error) {
 		}
 		kek, err := openKey(rootKey, wrapped, aad)
 		if err != nil {
-			return nil, fmt.Errorf("%w (wrong passphrase, or the keyring was modified)", err)
+			return nil, fmt.Errorf("%w (%s)", err, wrongKeyHint)
 		}
 		if err := ring.Add(entry.KID, kek); err != nil {
 			clear(kek)

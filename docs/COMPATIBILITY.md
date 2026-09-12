@@ -175,6 +175,38 @@ rejected them, because rotation would look safe while losing writes. That is wha
 decision with a warning, rather than something a provider does quietly. Whether
 R2 and Backblaze B2 enforce them is still untested.
 
+### Key services
+
+The root key that unlocks the keyring can come from a passphrase, from Vault's
+Transit engine or from AWS KMS (ADR-013). Measured, not assumed:
+
+| Service | Version | Result |
+|---|---|---|
+| Vault Transit | `hashicorp/vault` dev mode, 2026-09 | **Works.** Seal a keyring, start the gateway with no passphrase anywhere, round-trip a 3 MB object with an identical SHA-256. Deleting the Transit key stops the next start with `encryption key not found`. |
+| AWS KMS | **the protocol, not the service** | Exercised against `nsmithuk/local-kms`, which speaks the KMS JSON API: `CreateKey`, `Encrypt`, `Decrypt`, SigV4 and all. What that establishes is that the client speaks KMS correctly. It is **not** a test against AWS, and this project has not run one. |
+
+That asymmetry is deliberate rather than an oversight. An AWS account is not a
+build dependency, and "supports AWS KMS" without ever having called AWS would be
+a claim this document exists to avoid making.
+
+Both are brought up with the compose profile the tests use:
+
+```sh
+docker compose --profile keys up -d
+BLINDBUCKET_TEST_VAULT_ADDR=http://127.0.0.1:8200 \
+BLINDBUCKET_TEST_VAULT_TOKEN=blindbucket-dev-token \
+BLINDBUCKET_TEST_KMS_ENDPOINT=http://127.0.0.1:4599 \
+  go test ./internal/rootkey
+```
+
+| Limit | Detail |
+|---|---|
+| **The AWS credential chain** | Not used. KMS credentials are configured explicitly, so instance roles, web identity and SSO do not apply. A consequence of hand-writing the client rather than taking the SDK (ADR-013). |
+| **Changing a keyring's source** | There is no `blindbucket reseal`. Moving between a passphrase, Vault and KMS means creating a new keyring and rotating objects onto it. |
+| **Vault authentication** | A token. AppRole, Kubernetes auth and the rest are not implemented; a token from any of them can be configured. |
+
+---
+
 ### A note on reverse proxies in front of the gateway
 
 The gateway emits user metadata with lower-case header names on purpose, because

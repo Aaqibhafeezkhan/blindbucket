@@ -1,0 +1,198 @@
+package rootkey
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+
+	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
+)
+
+// KMSConfig addresses an AWS KMS key.
+type KMSConfig struct {
+	// Region the key lives in.
+	Region string
+	// KeyID is the key, alias or ARN that encrypts the root key.
+	KeyID string
+
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+
+	// Endpoint overrides the derived kms.<region>.amazonaws.com. It exists for
+	// LocalStack and for the AWS-compatible endpoints some environments front
+	// KMS with; leave it empty for AWS.
+	Endpoint string
+
+	HTTPClient *http.Client
+	// now is injectable so the signature of a test is deterministic.
+	now func() time.Time
+}
+
+// KMS obtains a root key from AWS KMS.
+//
+// Like the upstream S3 client (ADR-003) this speaks the service's HTTP API
+// directly rather than through the AWS SDK's KMS client. Two calls of a JSON
+// protocol need less code than the dependency would add, the SigV4 signer is
+// already in the module for the S3 side, and the alternative would have made
+// the largest dependency in a deliberately small module larger still.
+type KMS struct {
+	cfg      KMSConfig
+	client   *http.Client
+	signer   *v4.Signer
+	creds    aws.Credentials
+	endpoint string
+}
+
+// NewKMS validates the configuration and returns a source.
+func NewKMS(cfg KMSConfig) (*KMS, error) {
+	switch {
+	case strings.TrimSpace(cfg.Region) == "":
+		return nil, fmt.Errorf("rootkey: kms needs a region")
+	case strings.TrimSpace(cfg.KeyID) == "":
+		return nil, fmt.Errorf("rootkey: kms needs a key id")
+	case strings.TrimSpace(cfg.AccessKeyID) == "":
+		return nil, fmt.Errorf("rootkey: kms needs an access key id")
+	case strings.TrimSpace(cfg.SecretAccessKey) == "":
+		return nil, fmt.Errorf("rootkey: kms needs a secret access key")
+	}
+
+	endpoint := strings.TrimRight(cfg.Endpoint, "/")
+	if endpoint == "" {
+		endpoint = fmt.Sprintf("https://kms.%s.amazonaws.com", cfg.Region)
+	}
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: defaultTimeout}
+	}
+	if cfg.now == nil {
+		cfg.now = time.Now
+	}
+	return &KMS{
+		cfg:    cfg,
+		client: client,
+		signer: v4.NewSigner(),
+		creds: aws.Credentials{
+			AccessKeyID:     cfg.AccessKeyID,
+			SecretAccessKey: cfg.SecretAccessKey,
+			SessionToken:    cfg.SessionToken,
+		},
+		endpoint: endpoint,
+	}, nil
+}
+
+// Encrypt hands a fresh root key to KMS and returns the blob it gives back.
+//
+// Used by `blindbucket keygen`, never by the gateway.
+func (k *KMS) Encrypt(ctx context.Context, rootKey []byte) (string, error) {
+	var out struct {
+		CiphertextBlob string `json:"CiphertextBlob"`
+	}
+	in := map[string]string{
+		"KeyId":     k.cfg.KeyID,
+		"Plaintext": base64.StdEncoding.EncodeToString(rootKey),
+	}
+	if err := k.call(ctx, "Encrypt", in, &out); err != nil {
+		return "", err
+	}
+	if out.CiphertextBlob == "" {
+		return "", fmt.Errorf("rootkey: kms returned no ciphertext")
+	}
+	return out.CiphertextBlob, nil
+}
+
+// RootKey asks KMS to decrypt the stored root key.
+func (k *KMS) RootKey(ctx context.Context, ref keys.RootKeyRef) ([]byte, error) {
+	if ref.Source != keys.SourceAWSKMS {
+		return nil, fmt.Errorf("rootkey: keyring names source %q, not %q",
+			ref.Source, keys.SourceAWSKMS)
+	}
+	if _, err := ref.DecodeKMSCiphertext(); err != nil {
+		return nil, err
+	}
+
+	var out struct {
+		Plaintext string `json:"Plaintext"`
+	}
+	// KeyId is sent even though a symmetric decrypt does not need it: it makes
+	// KMS refuse a blob produced under a different key rather than opening it,
+	// so a keyring from another environment fails loudly here.
+	in := map[string]string{"CiphertextBlob": ref.Ciphertext, "KeyId": k.cfg.KeyID}
+	if err := k.call(ctx, "Decrypt", in, &out); err != nil {
+		return nil, err
+	}
+	key, err := base64.StdEncoding.DecodeString(out.Plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("rootkey: kms returned a plaintext that is not base64: %w", err)
+	}
+	if len(key) != keys.KeySize {
+		clear(key)
+		return nil, fmt.Errorf("rootkey: kms returned a %d byte key, want %d", len(key), keys.KeySize)
+	}
+	return key, nil
+}
+
+// call performs one signed KMS API call.
+//
+// KMS is AWS JSON 1.1: one POST to the service root, the operation in
+// X-Amz-Target, and a signature over the real payload hash rather than the
+// UNSIGNED-PAYLOAD the S3 client uses for streams.
+func (k *KMS) call(ctx context.Context, op string, in any, out any) error {
+	payload, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, k.endpoint+"/", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "TrentService."+op)
+	req.ContentLength = int64(len(payload))
+
+	sum := sha256.Sum256(payload)
+	if err := k.signer.SignHTTP(ctx, k.creds, req, hex.EncodeToString(sum[:]),
+		"kms", k.cfg.Region, k.cfg.now().UTC()); err != nil {
+		return fmt.Errorf("rootkey: signing the kms request: %w", err)
+	}
+
+	resp, err := k.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("rootkey: kms %s: %w", op, err)
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponse))
+		_ = resp.Body.Close()
+	}()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	if err != nil {
+		return fmt.Errorf("rootkey: reading the kms answer: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var failure struct {
+			Type    string `json:"__type"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &failure) == nil && (failure.Type != "" || failure.Message != "") {
+			return fmt.Errorf("rootkey: kms %s: %s %s (%d)",
+				op, failure.Type, failure.Message, resp.StatusCode)
+		}
+		return fmt.Errorf("rootkey: kms %s returned %d", op, resp.StatusCode)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("rootkey: the kms answer is not the expected JSON: %w", err)
+	}
+	return nil
+}

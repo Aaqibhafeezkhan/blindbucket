@@ -33,5 +33,59 @@ services:
       mc mb --ignore-existing local/blindbucket-test
       "
 
+  # The two key services, behind a profile so that `docker compose up -d` stays
+  # one container. Bring them up with:
+  #   docker compose --profile keys up -d
+  #
+  # Both are dev-mode: Vault with a fixed root token and no storage, LocalStack
+  # with whatever credentials are asked of it. They exist to run the root-key
+  # tests against the real APIs rather than a mock, and nothing here is a secret.
+  vault:
+    image: hashicorp/vault:latest
+    profiles: ["keys"]
+    cap_add: ["IPC_LOCK"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: blindbucket-dev-token
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: enable Transit and create the key the tests seal against.
+  vault-init:
+    image: hashicorp/vault:latest
+    profiles: ["keys"]
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: blindbucket-dev-token
+    entrypoint: >
+      /bin/sh -c "
+      vault secrets enable -path=transit transit || true;
+      vault write -f transit/keys/blindbucket || true
+      "
+
+  # A KMS emulator rather than the real thing: the KMS tests need an endpoint
+  # that speaks the API, and an AWS account is not a build dependency. This is
+  # local-kms (Apache 2.0), which is purpose-built for it -- LocalStack's
+  # current image requires a licence key.
+  #
+  # What that buys and what it does not is stated in docs/COMPATIBILITY.md: the
+  # protocol is exercised for real, the service is not AWS.
+  kms:
+    image: nsmithuk/local-kms:latest
+    profiles: ["keys"]
+    environment:
+      PORT: "8080"
+      KMS_REGION: us-east-1
+    ports:
+      - "4599:8080"
+
 volumes:
   minio-data:

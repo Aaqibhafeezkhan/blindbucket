@@ -28,11 +28,33 @@ upstream:
   access_key_id: ${UPSTREAM_ACCESS_KEY_ID}
   secret_access_key: ${UPSTREAM_SECRET_ACCESS_KEY}
 
+# Where the root key that unlocks the keyring comes from. Whichever source is
+# named, it is consulted once at startup: the KEKs are then in memory and no
+# request pays a round trip to a key service (ADR-013).
 keys:
-  provider: file                         # the only provider today; vault and awskms are deferred
+  provider: file                         # file | vault | awskms
   keyring: keyring.json
   # passphrase_file: /run/secrets/keyring-passphrase
   # Otherwise the passphrase comes from $BLINDBUCKET_PASSPHRASE.
+
+  # provider: vault -- Vault decrypts the root key and never hands out the key
+  # that does it. Revoking the transit key locks every instance out at its next
+  # restart.
+  # vault:
+  #   address: ${VAULT_ADDR}
+  #   token: ${VAULT_TOKEN}
+  #   mount: transit                     # where the engine is mounted
+  #   key_name: blindbucket
+  #   namespace: ""                      # Vault Enterprise only
+
+  # provider: awskms -- the same shape against KMS. Credentials are explicit:
+  # this build does not use the AWS credential chain (ADR-013).
+  # awskms:
+  #   region: eu-central-1
+  #   key_id: alias/blindbucket
+  #   access_key_id: ${AWS_ACCESS_KEY_ID}
+  #   secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  #   endpoint: ""                       # override for an AWS-compatible endpoint
 
 crypto:
   log2_chunk_size: 16                    # 64 KiB

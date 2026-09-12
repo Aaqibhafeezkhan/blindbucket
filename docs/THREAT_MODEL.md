@@ -1,8 +1,9 @@
 # Threat Model
 
 **Status:** Current as of `v0.1.0` plus server-side copy
-([ADR-012](adr/ADR-012-copy-semantics.md)). Revised at every milestone that adds
-an attack surface.
+([ADR-012](adr/ADR-012-copy-semantics.md)) and the Vault and KMS root-key
+sources ([ADR-013](adr/ADR-013-root-key-sources.md)). Revised at every milestone
+that adds an attack surface.
 
 Everything below is implemented and covered by the attack tests of section 7 --
 the segment format's own guarantees (chunk integrity, ordering, truncation
@@ -142,6 +143,19 @@ authenticated size is established when the object is actually read.
 Go does not guarantee that a buffer can be reliably overwritten — the garbage collector may
 copy it. Keys therefore cannot be scrubbed with confidence. Operational mitigations: disable
 core dumps, disable or encrypt swap, restrict keyring file permissions to the service user.
+
+Unsealing the keyring with Vault Transit or AWS KMS does **not** change this, and it is
+worth being explicit because it is the thing people assume it changes. The service
+decrypts the root key at startup and the key is then in the process, exactly as a
+passphrase-derived one is. Somebody who can read the gateway's memory gets it either way.
+
+What the services do change is custody. The secret is not a passphrase on an operator's
+machine or in a CI variable; access to it is logged by a system the gateway does not
+control; and it can be withdrawn — revoking the Transit key locks every instance out at
+its next restart, which no passphrase can do once the passphrase is out. Against an
+attacker who has the running host, that is worth nothing. Against a leaked keyring file,
+a departing operator, or an instance that must be retired, it is the difference between
+rotating every KEK and revoking one grant ([ADR-013](adr/ADR-013-root-key-sources.md)).
 
 ### 5.6 DEK compromise
 

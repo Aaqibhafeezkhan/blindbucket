@@ -22,8 +22,9 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 > **Status: `v0.1.0` — usable.** Standard S3 clients round-trip through the
 > gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
 > 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
-> Key rotation, server-side copy, metrics and health endpoints are in. Not in:
-> the AWS KMS and Vault key providers. See [Roadmap](#roadmap),
+> Key rotation, server-side copy, metrics and health endpoints are in, and the
+> keyring can be unsealed by Vault Transit or AWS KMS instead of a passphrase.
+> See [Roadmap](#roadmap),
 > [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -386,20 +387,31 @@ memory is a function of streams in flight and not of object size.
 | — | Independent Python reference decoder, differential fuzzing | **done** |
 | M5 | `blindbucket rotate`, metrics and health, benchmarks, release | **done** |
 | — | `CopyObject` and `UploadPartCopy`, deferred from M5 | **done** |
-| — | Deferred from M5: AWS KMS and Vault key providers | open |
+| — | Vault Transit and AWS KMS as root-key sources, deferred from M5 | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3
 clients" actually means for anything over 8 MiB. M3.5 existed to get its coordination rules
 right before the code did — see below.
 
-**What is still missing.** The key providers are the file-backed keyring only; the
-`KeyProvider` interface is what the AWS KMS and Vault implementations will slot into, and
-neither exists yet. Object tags are refused rather than stored, because the provider would
-hold them in plaintext ([ADR-012](docs/adr/ADR-012-copy-semantics.md)).
-`ListMultipartUploads` is refused permanently and says why. And one benchmark cell is
-documented as the provider's behaviour rather than explained; the gateway's share of it is
-measured at 0.13 ms per request.
+**What is still missing.** There is no `blindbucket reseal`: moving a keyring from one
+root-key source to another means creating a new keyring and rotating objects onto it. The
+AWS credential chain is not used — KMS credentials are configured explicitly
+([ADR-013](docs/adr/ADR-013-root-key-sources.md)). Object tags are refused rather than
+stored, because the provider would hold them in plaintext
+([ADR-012](docs/adr/ADR-012-copy-semantics.md)). `ListMultipartUploads` is refused
+permanently and says why. And one benchmark cell is documented as the provider's behaviour
+rather than explained; the gateway's share of it is measured at 0.13 ms per request.
+
+**Unsealing the keyring.** The root key can come from a passphrase, from Vault's Transit
+engine or from AWS KMS, and the keyring file records which one sealed it — so a keyring
+from the wrong environment is named as such rather than failing as a decryption error. The
+service is asked once, at startup: after that every KEK is in memory and no request pays a
+round trip. That is a deliberate trade, and its limit is stated plainly — the root key is
+in the process afterwards either way. What the services buy is custody: the secret is not
+a passphrase on somebody's laptop, access is logged elsewhere, and it can be revoked.
+Deleting the Transit key stops the next start with `encryption key not found`, which is
+verified rather than asserted ([ADR-013](docs/adr/ADR-013-root-key-sources.md)).
 
 **Server-side copy.** `aws s3 cp s3://a s3://b` and `aws s3 mv` work at any size. A copy
 does not move the object: the data key is unwrapped under the source's identity and wrapped
@@ -473,7 +485,8 @@ make tla            # model-check spec/tla (needs a JRE; downloads tla2tools.jar
 make demo-setup     # MinIO, keyring, config, gateway and a payload for demo/
 make demo           # run the end-to-end demo (see demo/README.md)
 
-docker compose up -d   # local MinIO on :9002, console on :9091
+docker compose up -d                 # local MinIO on :9002, console on :9091
+docker compose --profile keys up -d  # and Vault on :8200, a KMS emulator on :4599
 ```
 
 The integration tests need a provider and skip without one:
@@ -481,6 +494,12 @@ The integration tests need a provider and skip without one:
 ```sh
 docker compose up -d
 BLINDBUCKET_TEST_S3_ENDPOINT=http://localhost:9002 go test ./internal/upstream ./internal/proxy
+
+# the root-key sources need their own two services:
+docker compose --profile keys up -d
+BLINDBUCKET_TEST_VAULT_ADDR=http://127.0.0.1:8200 \
+BLINDBUCKET_TEST_VAULT_TOKEN=blindbucket-dev-token \
+BLINDBUCKET_TEST_KMS_ENDPOINT=http://127.0.0.1:4599 go test ./internal/rootkey
 
 # and against a running gateway, with a real client:
 python3 test/integration/clients/boto3/scenarios.py

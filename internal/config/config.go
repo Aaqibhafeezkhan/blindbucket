@@ -89,16 +89,46 @@ type Upstream struct {
 	SessionToken    string `yaml:"session_token"`
 }
 
-// Keys configures where key-encryption keys come from.
+// Keys configures where the root key that unlocks the keyring comes from.
+//
+// Whichever source is named, it is consulted once at startup: the KEKs are then
+// in memory and no request pays a round trip to a key service.
 type Keys struct {
-	// Provider selects the root-key source. Only "file" exists in this build;
-	// "vault" and "awskms" are deferred: the KeyProvider interface is what they
-	// slot into, and neither is implemented yet.
+	// Provider selects the root-key source: "file" derives it from a passphrase
+	// with Argon2id, "vault" asks Vault's Transit engine to decrypt it, and
+	// "awskms" asks AWS KMS. The keyring file records which one sealed it, and
+	// a mismatch is refused rather than guessed at.
 	Provider string `yaml:"provider"`
 	Keyring  string `yaml:"keyring"`
-	// PassphraseFile holds the keyring passphrase. If empty, the passphrase is
-	// read from $BLINDBUCKET_PASSPHRASE.
+	// PassphraseFile holds the keyring passphrase, for provider "file". If
+	// empty, the passphrase is read from $BLINDBUCKET_PASSPHRASE.
 	PassphraseFile string `yaml:"passphrase_file"`
+
+	Vault  VaultKeys  `yaml:"vault"`
+	AWSKMS AWSKMSKeys `yaml:"awskms"`
+}
+
+// VaultKeys addresses the Transit key that seals the keyring.
+type VaultKeys struct {
+	Address string `yaml:"address"`
+	Token   string `yaml:"token"`
+	// Mount is where the Transit engine lives. Defaults to "transit".
+	Mount     string `yaml:"mount"`
+	KeyName   string `yaml:"key_name"`
+	Namespace string `yaml:"namespace"`
+}
+
+// AWSKMSKeys addresses the KMS key that seals the keyring.
+type AWSKMSKeys struct {
+	Region string `yaml:"region"`
+	// KeyID is a key id, alias or ARN.
+	KeyID           string `yaml:"key_id"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	SecretAccessKey string `yaml:"secret_access_key"`
+	SessionToken    string `yaml:"session_token"`
+	// Endpoint overrides kms.<region>.amazonaws.com, for LocalStack and for
+	// AWS-compatible endpoints.
+	Endpoint string `yaml:"endpoint"`
 }
 
 // Crypto configures the segment format.
@@ -240,6 +270,39 @@ func expandEnv(name string, field *string) error {
 	return nil
 }
 
+// validate checks the root-key source names everything it needs.
+//
+// A missing field here is a process that starts and then cannot open its
+// keyring, which is worse than one that refuses to start.
+func (k Keys) validate() error {
+	switch k.Provider {
+	case "file":
+		return nil
+	case "vault":
+		switch {
+		case k.Vault.Address == "":
+			return fmt.Errorf("keys.vault.address is required for provider \"vault\"")
+		case k.Vault.Token == "":
+			return fmt.Errorf("keys.vault.token is required for provider \"vault\"")
+		case k.Vault.KeyName == "":
+			return fmt.Errorf("keys.vault.key_name is required for provider \"vault\"")
+		}
+		return nil
+	case "awskms":
+		switch {
+		case k.AWSKMS.Region == "":
+			return fmt.Errorf("keys.awskms.region is required for provider \"awskms\"")
+		case k.AWSKMS.KeyID == "":
+			return fmt.Errorf("keys.awskms.key_id is required for provider \"awskms\"")
+		case k.AWSKMS.AccessKeyID == "" || k.AWSKMS.SecretAccessKey == "":
+			return fmt.Errorf("keys.awskms credentials are required for provider \"awskms\"")
+		}
+		return nil
+	default:
+		return fmt.Errorf("keys.provider %q is not one of \"file\", \"vault\", \"awskms\"", k.Provider)
+	}
+}
+
 func (c *Config) validate() error {
 	switch {
 	case c.Server.Listen == "":
@@ -253,10 +316,11 @@ func (c *Config) validate() error {
 	case len(c.Clients) == 0:
 		return fmt.Errorf("at least one entry under clients is required; " +
 			"the proxy does not serve unauthenticated requests")
-	case c.Keys.Provider != "file":
-		return fmt.Errorf("keys.provider %q is not supported in this build (only \"file\")", c.Keys.Provider)
 	case c.Keys.Keyring == "":
 		return fmt.Errorf("keys.keyring is required")
+	}
+	if err := c.Keys.validate(); err != nil {
+		return err
 	}
 	for i, client := range c.Clients {
 		switch {

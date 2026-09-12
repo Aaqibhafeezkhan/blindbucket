@@ -35,6 +35,22 @@ why a shared data key is not nonce reuse in the sense that matters.
 **`GetObjectTagging`**, forwarded to the provider, because the AWS CLI asks for
 the source's tags before a server-side copy.
 
+**Vault Transit and AWS KMS as root-key sources**, the last of M5. The keyring
+can be sealed by a key service instead of a passphrase: the service decrypts the
+root key at startup and never hands out the key that does it. It is asked once —
+after that every KEK is in memory and no request pays a round trip, which is the
+whole reason the key hierarchy of [ADR-002](docs/adr/ADR-002-key-hierarchy.md)
+exists. The keyring file records which source sealed it, so a keyring from
+another environment is named as such rather than failing as a decryption error.
+
+The honest limit: the root key is in the gateway's memory afterwards, exactly as
+a passphrase-derived one is. What the services buy is custody rather than
+runtime secrecy — and revocation, which is verified rather than asserted:
+deleting the Transit key stops the next start with `encryption key not found`.
+Both clients are hand-written against the services' HTTP APIs, so Vault adds no
+dependency and KMS reuses the SigV4 signer already there
+([ADR-013](docs/adr/ADR-013-root-key-sources.md)).
+
 ### Changed
 
 **Object tags are refused rather than ignored.** `PutObjectTagging`,

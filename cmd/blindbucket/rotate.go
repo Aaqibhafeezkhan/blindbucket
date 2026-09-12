@@ -76,7 +76,7 @@ Flags:
 	if pass.file == "" {
 		pass.file = cfg.Keys.PassphraseFile
 	}
-	ring, err := loadServerKeyring(cfg, &pass)
+	ring, err := loadServerKeyring(ctx, cfg, &pass)
 	if err != nil {
 		return err
 	}

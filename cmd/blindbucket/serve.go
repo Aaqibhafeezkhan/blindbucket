@@ -68,7 +68,7 @@ Flags:
 	if pass.file == "" {
 		pass.file = cfg.Keys.PassphraseFile
 	}
-	ring, err := loadServerKeyring(cfg, &pass)
+	ring, err := loadServerKeyring(ctx, cfg, &pass)
 	if err != nil {
 		return err
 	}
@@ -208,18 +208,8 @@ Flags:
 	}
 }
 
-func loadServerKeyring(cfg *config.Config, pass *passphraseFlags) (*keys.Keyring, error) {
-	//nolint:gosec // the path comes from the operator's own configuration file.
-	data, err := os.ReadFile(cfg.Keys.Keyring)
-	if err != nil {
-		return nil, err
-	}
-	phrase, err := pass.resolve("Passphrase for "+cfg.Keys.Keyring+": ", false)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(phrase)
-	return keys.LoadKeyring(data, phrase)
+func loadServerKeyring(ctx context.Context, cfg *config.Config, pass *passphraseFlags) (*keys.Keyring, error) {
+	return openKeyring(ctx, cfg.Keys.Keyring, cfg.Keys, pass)
 }
 
 // probeBucket picks a bucket for the readiness check to look at.
