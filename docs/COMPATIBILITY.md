@@ -149,6 +149,26 @@ These apply to every client.
 | **`UploadPartCopy`** | Returns `NotImplemented`. It needs the range-preserving copy path that arrives with `CopyObject`. | M5 |
 | **Part sizes** | Every part but the last must be a multiple of the chunk size (FORMAT §7.3). The defaults of every client above satisfy this; a client configured with, say, 5.5 MiB parts is refused at completion with a message naming the fix. | — |
 
+### Conditional writes, for rotation
+
+`blindbucket rotate` needs the provider to honour two preconditions, and
+CONCEPT.md §11.2 left it open whether MinIO does. Measured:
+
+| Precondition | MinIO | Used for |
+|---|---|---|
+| `x-amz-copy-source-if-match` on `UploadPartCopy` | **enforced** | the source changing between the HEAD and the copy |
+| `If-Match` on `CompleteMultipartUpload` | **enforced** | the target changing between the copy and the completion |
+
+Both answer `412 PreconditionFailed`, and in practice the copy refuses first —
+the rotation never gets as far as the completion. Either way the object is
+counted as skipped rather than overwritten, which is invariant I2 holding.
+
+A provider that silently *ignored* these headers would be worse than one that
+rejected them, because rotation would look safe while losing writes. That is what
+`--allow-unconditional` exists for: it makes dropping the guard an explicit
+decision with a warning, rather than something a provider does quietly. Whether
+R2 and Backblaze B2 enforce them is still untested.
+
 ### A note on reverse proxies in front of the gateway
 
 The gateway emits user metadata with lower-case header names on purpose, because

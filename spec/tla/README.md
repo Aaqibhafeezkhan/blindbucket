@@ -199,9 +199,15 @@ because of that one header.
 This is not a defect to fix — it is the documented price of the flag, and the model is what
 makes the warning in the documentation a measured statement rather than a hedge.
 
-It is the one counterexample with no integration test yet: `blindbucket rotate` arrives with
-M5, and the conditional write it depends on is already in the upstream client
-(`CompleteMultipartUploadInput.IfMatch`).
+**M5 integration test:** `TestIntegrationRotateDoesNotLoseUpdates`. It holds a rotation after
+it has read the object, lets a client replace the object through the gateway, releases it, and
+requires the client's bytes to be the ones that survive and the rotation to report the object
+as skipped rather than rotated.
+
+With that, all four counterexamples have tests. Running it also answered a question §11.2 left
+open: MinIO enforces both guards, and it is the copy rather than the completion that refuses
+first — `x-amz-copy-source-if-match` fails before any part is written. Both answer 412, and
+both mean the same thing to the caller.
 
 ---
 
@@ -216,4 +222,4 @@ a trace and a test can be read side by side.
 | `Del` | `internal/proxy/object.go`, `deleteObject` |
 | `Gc` | `internal/gc/gc.go`, `collectKey` |
 | `Put` | `internal/proxy/object.go`, `putObject` — writes no manifest, by design |
-| `Rot` | M5 |
+| `Rot` | `internal/rotate/rotate.go`, `writeBack` |

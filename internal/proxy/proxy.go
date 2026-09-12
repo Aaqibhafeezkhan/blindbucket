@@ -12,16 +12,13 @@ import (
 	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
+	"github.com/LennardGeissler/blindbucket/internal/objectmeta"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
 
 // errNotEncrypted reports an upstream object that blindbucket did not write.
-//
-// Such an object is served to nobody. Passing it through would mean the same
-// endpoint sometimes returns authenticated plaintext and sometimes returns
-// whatever happened to be in the bucket, with no way for a client to tell which.
-var errNotEncrypted = errors.New("object was not written by this gateway")
+var errNotEncrypted = objectmeta.ErrNotEncrypted
 
 // errNotEncryptedAPI is what a client sees for such an object.
 var errNotEncryptedAPI = &s3api.Error{

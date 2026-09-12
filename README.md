@@ -39,7 +39,7 @@ project.
 | Constant memory | `O(chunk size)` per active stream, independent of object size |
 | Statelessness | No local state; multipart state travels in an encrypted token |
 | Drop-in compatibility | Standard clients unchanged, only `--endpoint-url` |
-| Key rotation — *not yet implemented, M5* | KEK rotation via server-side copy, no data transfer |
+| Key rotation | KEK rotation by server-side copy; 1000 objects move 1.4 MiB, not 62.5 MiB |
 
 ## Why not just use…
 
@@ -128,6 +128,21 @@ of band:
 ```sh
 ./bin/blindbucket gc --config blindbucket.yaml --dry-run s3://blindbucket-dev
 ```
+
+Retiring a key-encryption key does not mean re-encrypting anything. Each object
+keeps its data key; only the key that wraps it changes, so the ciphertext never
+leaves the provider:
+
+```sh
+./bin/blindbucket keygen --keyring keyring.json --kid 2026-10   # add the new KEK
+./bin/blindbucket rotate --config blindbucket.yaml --to-kid 2026-10 s3://blindbucket-dev
+```
+
+A thousand 64 KiB objects rotate in about a second and a half, moving 1.4 MiB
+over the wire for 62.5 MiB of payload — and that per-object cost does not grow
+with object size. Clients may keep writing throughout: the rotation's final write
+is conditional on the ETag it started from, so a client write that lands in
+between wins and the object is skipped until the next run.
 
 ### Without a server
 
@@ -258,7 +273,8 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | **done** |
-| M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics | planned |
+| M5 | Production: KMS/Vault providers, `CopyObject`, metrics | planned |
+| — | `blindbucket rotate`: KEK rotation with conditional writes | **done** |
 | — | Benchmarks: micro, memory, `warp` macro comparison, figures | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
