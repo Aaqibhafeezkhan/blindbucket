@@ -73,6 +73,26 @@ compare against. Copying or rotating such an object rewrites its manifest and
 closes the gap, because a finished object's headers can be read where an open
 upload's cannot.
 
+**The beginning of object name encryption** (M6): `internal/crypto/names` maps
+object keys to the keys the provider sees, deterministically and per path
+segment so that prefix listing keeps working. Not yet wired into the gateway —
+the design, the primitive and its costs are settled in
+[ADR-015](docs/adr/ADR-015-object-name-encryption.md), which is Proposed rather
+than Accepted for that reason.
+
+Two things the design work settled that were not obvious. A point lookup must
+not need an index, which forces *every* segment to be deterministic, including
+the leaf — so the more private option, a randomised leaf that hides sibling
+names, is unavailable rather than merely unchosen. And the usual Go AES-SIV
+library has no release tags, has not moved since 2018 and depends on a module
+from 2016, so the SIV construction is composed from standard library primitives
+instead, exactly as the segment format composes STREAM from AES-GCM.
+
+The round-trip fuzz target earned its place immediately: base32 leaves four
+spare bits in the final character of a 17-byte segment, so sixteen spellings
+decoded to the same bytes — sixteen stored keys naming one object. Canonical
+encoding is now enforced and the counterexample is a seed.
+
 ### Changed
 
 **Object tags are refused rather than ignored.** `PutObjectTagging`,
