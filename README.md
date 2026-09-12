@@ -22,8 +22,8 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 > **Status: `v0.1.0` — usable.** Standard S3 clients round-trip through the
 > gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
 > 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
-> Key rotation, metrics and health endpoints are in. Not in: the AWS KMS and
-> Vault key providers, and `CopyObject`. See [Roadmap](#roadmap),
+> Key rotation, server-side copy, metrics and health endpoints are in. Not in:
+> the AWS KMS and Vault key providers. See [Roadmap](#roadmap),
 > [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -385,20 +385,30 @@ memory is a function of streams in flight and not of object size.
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | **done** |
 | M5 | `blindbucket rotate`, metrics and health, benchmarks, release | **done** |
-| — | Deferred from M5: AWS KMS and Vault key providers, `CopyObject` | open |
+| — | `CopyObject` and `UploadPartCopy`, deferred from M5 | **done** |
+| — | Deferred from M5: AWS KMS and Vault key providers | open |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3
 clients" actually means for anything over 8 MiB. M3.5 existed to get its coordination rules
 right before the code did — see below.
 
-**What `v0.1.0` does not have.** The key providers are the file-backed keyring only; the
+**What is still missing.** The key providers are the file-backed keyring only; the
 `KeyProvider` interface is what the AWS KMS and Vault implementations will slot into, and
-neither exists yet. `CopyObject` is refused — the copy machinery is in the upstream client,
-because rotation needs it, but the S3 operation is not wired up. `ListMultipartUploads` is
-refused permanently and says why. And one benchmark cell is documented as the provider's
-behaviour rather than explained; the gateway's share of it is measured at 0.13 ms per
-request.
+neither exists yet. Object tags are refused rather than stored, because the provider would
+hold them in plaintext ([ADR-012](docs/adr/ADR-012-copy-semantics.md)).
+`ListMultipartUploads` is refused permanently and says why. And one benchmark cell is
+documented as the provider's behaviour rather than explained; the gateway's share of it is
+measured at 0.13 ms per request.
+
+**Server-side copy.** `aws s3 cp s3://a s3://b` and `aws s3 mv` work at any size. A copy
+does not move the object: the data key is unwrapped under the source's identity and wrapped
+again under the destination's, because the wrap is bound to bucket and key, and the
+ciphertext is copied inside the provider — 1.2 KB over the wire for a 600 KB object. Above
+the client's multipart threshold the AWS CLI switches to `UploadPartCopy`, which *cannot*
+stay server-side: a part is a segment with its own salt, so the range is decrypted and
+re-encrypted on the way through. Why, and why the shared data key is not nonce reuse in the
+sense that matters, is [ADR-012](docs/adr/ADR-012-copy-semantics.md).
 
 ## A race in my own design, and the machine that found it
 

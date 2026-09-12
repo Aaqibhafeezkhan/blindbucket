@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -593,15 +594,58 @@ func passthroughContentEncoding(r *http.Request) string {
 }
 
 // rejectUnsupportedUpload refuses request features this build cannot honour.
+//
+// A copy source reaching here means the router did not classify the request as
+// a copy -- an UploadPart carrying one, for instance. The routing handles the
+// cases it knows; this is the backstop that keeps a copy source from being
+// silently ignored and an empty body stored as the object.
 func rejectUnsupportedUpload(r *http.Request) *s3api.Error {
 	if r.Header.Get("X-Amz-Copy-Source") != "" {
-		return s3api.ErrNotImplemented.WithMessage("CopyObject is not implemented in this build")
+		return s3api.ErrNotImplemented.WithMessage(
+			"this operation does not accept x-amz-copy-source in this build")
+	}
+	// Silently dropping tags would be worse than refusing them: a client would
+	// believe its object carries them. Storing them would be worse still --
+	// they are plaintext at the provider.
+	if r.Header.Get("X-Amz-Tagging") != "" {
+		return s3api.ErrNotImplemented.WithMessage(
+			"object tags are not accepted: the provider would store them in plaintext")
 	}
 	for name := range r.Header {
 		if strings.HasPrefix(strings.ToLower(name), "x-amz-server-side-encryption") {
 			return s3api.ErrNotImplemented.WithMessage(
 				"server-side encryption headers are not accepted; this gateway encrypts already")
 		}
+	}
+	return nil
+}
+
+// getObjectTagging forwards the tagging sub-resource to the provider.
+//
+// The gateway writes no tags, so for an object it stored this is an empty set.
+// It is forwarded rather than answered locally because tags set out of band are
+// the provider's to report, and inventing an empty answer would hide them.
+func (p *Proxy) getObjectTagging(
+	w http.ResponseWriter, r *http.Request, req s3api.Request, log *slog.Logger,
+) *s3api.Error {
+	resp, err := p.upstream.ObjectPassthrough(r.Context(), http.MethodGet,
+		req.Bucket, req.Key, url.Values{"tagging": {""}})
+	if err != nil {
+		return translateUpstream(err)
+	}
+	log.Debug("object tagging served", "status", resp.StatusCode)
+
+	for name, values := range resp.Header {
+		if strings.EqualFold(name, "Content-Length") {
+			continue
+		}
+		w.Header()[name] = values
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(resp.Body)))
+	w.WriteHeader(resp.StatusCode)
+	if r.Method != http.MethodHead {
+		//nolint:gosec // the provider's own XML under its own content type.
+		_, _ = w.Write(resp.Body)
 	}
 	return nil
 }

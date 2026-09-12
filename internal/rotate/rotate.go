@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -30,13 +29,11 @@ import (
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
 	"github.com/LennardGeissler/blindbucket/internal/manifest"
+	"github.com/LennardGeissler/blindbucket/internal/objcopy"
 	"github.com/LennardGeissler/blindbucket/internal/objectmeta"
 	"github.com/LennardGeissler/blindbucket/internal/s3api"
 	"github.com/LennardGeissler/blindbucket/internal/upstream"
 )
-
-// maxManifestBytes bounds a manifest read back from the provider.
-const maxManifestBytes = 1 << 20
 
 // Config describes one rotation run.
 type Config struct {
@@ -218,14 +215,7 @@ func rotateOne(ctx context.Context, cfg Config, key string, result *Result) {
 		return
 	}
 
-	rewrapped, err := rewrap(ctx, cfg, key, meta)
-	if err != nil {
-		log.Warn("could not re-wrap the data key", "err", err)
-		atomic.AddInt64(&result.Failed, 1)
-		return
-	}
-
-	switch err := writeBack(ctx, cfg, key, info, meta, rewrapped); {
+	switch err := writeBack(ctx, cfg, key, info, meta); {
 	case err == nil:
 		log.Debug("rotated", "from", meta.KeyID, "to", cfg.TargetKID)
 		atomic.AddInt64(&result.Rotated, 1)
@@ -241,103 +231,23 @@ func rotateOne(ctx context.Context, cfg Config, key string, result *Result) {
 }
 
 // errChangedUnderUs reports that the object was replaced mid-rotation.
-var errChangedUnderUs = errors.New("rotate: the object changed during the rotation")
-
-// rewrapped carries the metadata a rotated object must be written with.
-type rewrapped struct {
-	meta objectmeta.Meta
-	// dek is needed only for a multipart object, whose manifest is signed with
-	// a key derived from it.
-	dek []byte
-}
-
-// rewrap unwraps the data key under the old KEK and wraps it under the new one.
-//
-// The key id is part of the associated data of both operations (FORMAT §6.1),
-// so the unwrap has to use the id the object records and the wrap the new one.
-func rewrap(ctx context.Context, cfg Config, key string, meta objectmeta.Meta) (*rewrapped, error) {
-	oldAAD, err := keys.ObjectAAD(meta.KeyID, cfg.Bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	dek, err := cfg.Keys.Unwrap(ctx, meta.KeyID, meta.WrappedDEK, oldAAD)
-	if err != nil {
-		return nil, fmt.Errorf("unwrapping under %q: %w", meta.KeyID, err)
-	}
-
-	newAAD, err := keys.ObjectAAD(cfg.TargetKID, cfg.Bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	wrapped, err := cfg.Keys.Wrap(ctx, cfg.TargetKID, dek, newAAD)
-	if err != nil {
-		return nil, fmt.Errorf("wrapping under %q: %w", cfg.TargetKID, err)
-	}
-
-	out := meta
-	out.KeyID = cfg.TargetKID
-	out.WrappedDEK = wrapped
-	return &rewrapped{meta: out, dek: dek}, nil
-}
+var errChangedUnderUs = objcopy.ErrPreconditionFailed
 
 // writeBack republishes the object with its new metadata.
 //
-// Both shapes go through a multipart upload, single-part objects included. A
-// plain CopyObject would work for them, but CompleteMultipartUpload is where the
-// conditional write lives, and a single part keeps the size arithmetic identical
-// (M = 1 gives the same result as a single-part object, FORMAT §7.2).
+// The work itself is objcopy's: re-wrap the data key, copy the segments inside
+// the provider, keep the manifest lifecycle rules. Rotation is the case where
+// the destination is the source, which is what makes the two conditions below
+// both about the same object.
 func writeBack(ctx context.Context, cfg Config, key string, info *upstream.ObjectInfo,
-	meta objectmeta.Meta, next *rewrapped,
+	meta objectmeta.Meta,
 ) error {
-	defer clear(next.dek)
-
-	// Rule R1: the copy is a new object version, so it mints a new manifest id
-	// rather than pointing at the one the old version used.
-	var layout []manifest.Part
-	if meta.Multipart {
-		parts, err := loadParts(ctx, cfg, key, meta, next.dek)
-		if err != nil {
-			return err
-		}
-		layout = parts
-
-		id, err := manifest.NewID()
-		if err != nil {
-			return err
-		}
-		next.meta.ManifestID, next.meta.Multipart = id, true
-	}
-
 	clientMeta := map[string]string{}
 	for name, value := range info.Metadata {
 		if !strings.HasPrefix(strings.ToLower(name), objectmeta.Prefix) {
 			clientMeta[name] = value
 		}
 	}
-	for name, value := range next.meta.Headers() {
-		clientMeta[name] = value
-	}
-
-	uploadID, err := cfg.Upstream.CreateMultipartUpload(ctx, upstream.CreateMultipartUploadInput{
-		Bucket: cfg.Bucket, Key: key,
-		ContentType:  info.ContentType,
-		CacheControl: info.CacheControl,
-		Metadata:     clientMeta,
-	})
-	if err != nil {
-		return fmt.Errorf("opening the rotation upload: %w", err)
-	}
-	// Any failure from here leaves an upload the provider would keep until its
-	// lifecycle rule expires it, so it is aborted on every path out.
-	cfg.at(HookCreate, key)
-	committed := false
-	defer func() {
-		if !committed {
-			if err := cfg.Upstream.AbortMultipartUpload(ctx, cfg.Bucket, key, uploadID); err != nil {
-				cfg.Log.Warn("could not abort a failed rotation upload", "key", key, "err", err)
-			}
-		}
-	}()
 
 	// There are two windows in which a client can replace the object, and each
 	// has its own guard. x-amz-copy-source-if-match covers the copy: if the
@@ -346,140 +256,54 @@ func writeBack(ctx context.Context, cfg Config, key string, info *upstream.Objec
 	// completion covers the rest -- a write that lands after the parts are
 	// copied but before the object is published. Both are 412, and both mean the
 	// same thing to a caller: leave the client's version alone.
-	completed, err := copyParts(ctx, cfg, key, info, layout, meta.Log2ChunkSize, uploadID)
-	if err != nil {
-		if upstream.PreconditionFailed(err) {
-			return errChangedUnderUs
-		}
-		return err
-	}
-
-	// Rule R2: the manifest exists before the object that names it does.
-	if next.meta.Multipart {
-		m := &manifest.Manifest{
-			Bucket: cfg.Bucket, Key: key, ID: next.meta.ManifestID, Parts: layout,
-		}
-		if err := writeManifest(ctx, cfg, m, next.dek); err != nil {
-			return err
-		}
-	}
-	cfg.at(HookManifest, key)
-
-	ifMatch := info.ETag
+	destIfMatch := info.ETag
 	if cfg.AllowUnconditional {
-		ifMatch = ""
+		destIfMatch = ""
 	}
-	_, err = cfg.Upstream.CompleteMultipartUpload(ctx, upstream.CompleteMultipartUploadInput{
-		Bucket: cfg.Bucket, Key: key, UploadID: uploadID,
-		Parts: completed, IfMatch: ifMatch,
-	})
-	if err != nil {
-		if upstream.PreconditionFailed(err) {
-			return errChangedUnderUs
-		}
-		return fmt.Errorf("completing the rotation: %w", err)
-	}
-	committed = true
-	cfg.at(HookComplete, key)
 
-	// Rule R3: and only now, the manifest of the version just replaced -- the id
-	// read before this write landed, and nothing else.
-	if meta.Multipart && meta.ManifestID != next.meta.ManifestID {
-		if err := cfg.Upstream.DeleteObject(ctx, cfg.Bucket,
-			meta.ManifestID.ObjectKey(key)); err != nil {
-			cfg.Log.Warn("could not remove the replaced manifest; gc will collect it",
-				"key", key, "err", err)
-		}
+	// Rotation knows the manifest it is replacing, because it is replacing its
+	// own source. It can therefore delete it under rule R3 rather than leaving
+	// it to gc.
+	var replaced *manifest.ID
+	if meta.Multipart {
+		id := meta.ManifestID
+		replaced = &id
 	}
-	return nil
+
+	_, err := objcopy.Do(ctx, objcopy.Deps{
+		Upstream: cfg.Upstream, Keys: cfg.Keys, Log: cfg.Log,
+	}, objcopy.Request{
+		Source: objcopy.Source{Bucket: cfg.Bucket, Key: key, Info: info, Meta: meta},
+		Dest: objcopy.Dest{
+			Bucket: cfg.Bucket, Key: key, KeyID: cfg.TargetKID,
+			UserMetadata: clientMeta,
+			ContentType:  info.ContentType,
+			CacheControl: info.CacheControl,
+		},
+		SourceIfMatch:    info.ETag,
+		DestIfMatch:      destIfMatch,
+		ReplacedManifest: replaced,
+		Hook:             cfg.hookAdapter(key),
+	})
+	return err
 }
 
-// copyParts fills the upload from the object itself, without moving any bytes
-// through this process.
-func copyParts(ctx context.Context, cfg Config, key string, info *upstream.ObjectInfo,
-	layout []manifest.Part, log2C uint8, uploadID string,
-) ([]upstream.CompletedPart, error) {
-	// A single-part object is copied whole as part 1.
-	if layout == nil {
-		etag, err := cfg.Upstream.UploadPartCopy(ctx, upstream.UploadPartCopyInput{
-			SourceBucket: cfg.Bucket, SourceKey: key,
-			Bucket: cfg.Bucket, Key: key, UploadID: uploadID,
-			PartNumber: 1, WholeObject: true, SourceIfMatch: info.ETag,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("copying the object: %w", err)
+// hookAdapter maps objcopy's step names onto the rotation step names the model
+// and the integration tests use.
+func (c Config) hookAdapter(key string) func(string) {
+	if c.Hook == nil {
+		return nil
+	}
+	return func(point string) {
+		switch point {
+		case objcopy.HookCreate:
+			c.at(HookCreate, key)
+		case objcopy.HookManifest:
+			c.at(HookManifest, key)
+		case objcopy.HookComplete:
+			c.at(HookComplete, key)
 		}
-		return []upstream.CompletedPart{{PartNumber: 1, ETag: etag}}, nil
 	}
-
-	// A multipart object keeps its part boundaries: the copy has to be the same
-	// shape as the original, or the manifest would describe a different object.
-	out := make([]upstream.CompletedPart, 0, len(layout))
-	var offset int64
-	for _, part := range layout {
-		sealed, err := stream.SealedSize(part.PlainSize, log2C)
-		if err != nil {
-			return nil, fmt.Errorf("part %d has an impossible size: %w", part.Number, err)
-		}
-		etag, err := cfg.Upstream.UploadPartCopy(ctx, upstream.UploadPartCopyInput{
-			SourceBucket: cfg.Bucket, SourceKey: key,
-			Bucket: cfg.Bucket, Key: key, UploadID: uploadID,
-			//nolint:gosec // part numbers come from a verified manifest, 1..10000.
-			PartNumber: int(part.Number),
-			First:      offset, Last: offset + sealed - 1,
-			SourceIfMatch: info.ETag,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("copying part %d: %w", part.Number, err)
-		}
-		//nolint:gosec // bounded by the manifest.
-		out = append(out, upstream.CompletedPart{PartNumber: int(part.Number), ETag: etag})
-		offset += sealed
-	}
-	return out, nil
-}
-
-// loadParts fetches and verifies the manifest of a multipart object.
-func loadParts(ctx context.Context, cfg Config, key string,
-	meta objectmeta.Meta, dek []byte,
-) ([]manifest.Part, error) {
-	out, err := cfg.Upstream.GetObject(ctx, upstream.GetObjectInput{
-		Bucket: cfg.Bucket, Key: meta.ManifestID.ObjectKey(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("reading the manifest: %w", err)
-	}
-	defer func() { _ = out.Body.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(out.Body, maxManifestBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("reading the manifest: %w", err)
-	}
-	if len(raw) > maxManifestBytes {
-		return nil, fmt.Errorf("%w: manifest exceeds %d bytes", manifest.ErrVerify, maxManifestBytes)
-	}
-	m, err := manifest.Unmarshal(raw, dek, cfg.Bucket, key, meta.ManifestID)
-	if err != nil {
-		return nil, err
-	}
-	return m.Parts, nil
-}
-
-// writeManifest stores the manifest of the rotated object.
-func writeManifest(ctx context.Context, cfg Config, m *manifest.Manifest, dek []byte) error {
-	raw, err := m.Marshal(dek)
-	if err != nil {
-		return fmt.Errorf("building the manifest: %w", err)
-	}
-	_, err = cfg.Upstream.PutObject(ctx, upstream.PutObjectInput{
-		Bucket: m.Bucket, Key: m.ID.ObjectKey(m.Key),
-		Body: strings.NewReader(string(raw)), ContentLength: int64(len(raw)),
-		ContentType: "application/octet-stream",
-	})
-	if err != nil {
-		return fmt.Errorf("storing the manifest: %w", err)
-	}
-	return nil
 }
 
 // Duration is a convenience for the CLI's summary.

@@ -587,7 +587,7 @@ func TestIntegrationRefusesUnsupported(t *testing.T) {
 	h.store(t, key, bytes.Repeat([]byte{7}, 1000))
 
 	t.Run("object sub-resources", func(t *testing.T) {
-		for _, suffix := range []string{"?acl", "?tagging", "?attributes", "?versionId=null"} {
+		for _, suffix := range []string{"?acl", "?attributes", "?versionId=null"} {
 			resp, err := h.client.Get(h.url(key) + suffix)
 			if err != nil {
 				t.Fatalf("GET: %v", err)
@@ -596,6 +596,44 @@ func TestIntegrationRefusesUnsupported(t *testing.T) {
 			if resp.StatusCode != http.StatusNotImplemented {
 				t.Errorf("%s returned %d, want 501", suffix, resp.StatusCode)
 			}
+		}
+	})
+
+	// Tagging is the asymmetric one. Reading is forwarded, because the AWS CLI
+	// asks for an object's tags before a server-side copy and a refusal there
+	// breaks every large copy. Writing is refused: the provider would store the
+	// tag in plaintext (ADR-012).
+	t.Run("tagging is readable and not writable", func(t *testing.T) {
+		resp, err := h.client.Get(h.url(key) + "?tagging")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET ?tagging returned %d, want 200", resp.StatusCode)
+		}
+
+		for _, method := range []string{http.MethodPut, http.MethodDelete} {
+			req, err := http.NewRequestWithContext(t.Context(), method, h.url(key)+"?tagging", nil)
+			if err != nil {
+				t.Fatalf("building request: %v", err)
+			}
+			resp, err := h.client.Do(req)
+			if err != nil {
+				t.Fatalf("%s: %v", method, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Errorf("%s ?tagging returned %d, want 501", method, resp.StatusCode)
+			}
+		}
+
+		// And the header form on an ordinary upload.
+		put := h.put(t, testKey(t, "tagged.bin"), []byte("tagged"),
+			map[string]string{"X-Amz-Tagging": "team=platform"})
+		_ = put.Body.Close()
+		if put.StatusCode != http.StatusNotImplemented {
+			t.Errorf("PUT with x-amz-tagging returned %d, want 501", put.StatusCode)
 		}
 	})
 

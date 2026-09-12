@@ -12,6 +12,42 @@ version 1 would keep being readable.
 
 ## [Unreleased]
 
+### Added
+
+**Server-side copy.** `CopyObject` and `UploadPartCopy`, the two operations
+`v0.1.0` refused, which between them are what `aws s3 cp s3://a s3://b` and
+`aws s3 mv` are made of. A copy does not move the object: the data key is
+unwrapped under the source's identity and wrapped again under the
+destination's — the wrap is bound to bucket and key (FORMAT §6.1) — while the
+ciphertext is copied inside the provider. 1.2 KB crosses the wire for a 600 KB
+object. Multipart objects keep their part boundaries and get their own manifest
+under a new id, by the same rules rotation follows.
+
+`UploadPartCopy` is the exception, and necessarily so: a part is a segment with
+its own salt, so the destination's part shares no bytes with the source's
+ciphertext even over identical plaintext. That range is decrypted and
+re-encrypted on the way through, at `O(chunk size)` memory. It is the path the
+AWS CLI takes above its 8 MiB threshold, and a 1 GiB copy through 128 part
+copies returns an identical SHA-256.
+[ADR-012](docs/adr/ADR-012-copy-semantics.md) records both decisions, including
+why a shared data key is not nonce reuse in the sense that matters.
+
+**`GetObjectTagging`**, forwarded to the provider, because the AWS CLI asks for
+the source's tags before a server-side copy.
+
+### Changed
+
+**Object tags are refused rather than ignored.** `PutObjectTagging`,
+`DeleteObjectTagging` and `x-amz-tagging` on an upload answer `NotImplemented`
+and say why: the provider would store them in plaintext. Previously
+`x-amz-tagging` was accepted and silently dropped, which left a client believing
+its object carried tags it did not.
+
+**`internal/objcopy`** now holds the republish logic that `internal/rotate` had
+its own copy of. The manifest lifecycle rules R1-R3 are an ordering of three
+writes that `spec/tla/Multipart.tla` checks; two implementations would
+eventually be two orderings, and only one of them was the one the model checked.
+
 ## [0.1.0] — 2026-09-12
 
 The first release. A transparent S3 encryption gateway: point a client at it

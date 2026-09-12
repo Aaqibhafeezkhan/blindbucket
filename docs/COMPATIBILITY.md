@@ -46,6 +46,10 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-eas
 | `aws s3 ls` of a multipart object | works — plaintext size, 5368709120 for the 5 GiB file |
 | `aws s3 cp` across two proxy instances | works — parts spread over both, no affinity needed |
 | restarting an instance mid-upload | the upload completes; the client retries the part it lost |
+| `aws s3 cp s3://bucket/a s3://bucket/b` (13 bytes) | works — `CopyObject`, no data over the wire |
+| `aws s3 cp s3://bucket/a s3://bucket/b` (1 GiB) | works — 128 `UploadPartCopy` calls, identical SHA-256 |
+| `aws s3 mv s3://bucket/a s3://bucket/b` | works — copy then delete |
+| `aws s3 ls` of a copied multipart object | works — plaintext size, 1073741824 for the 1 GiB copy |
 
 The CLI's default checksum is CRC64NVME, which is verified against the plaintext
 at the gateway and echoed back. That the echoed value matches what the CLI
@@ -146,7 +150,9 @@ These apply to every client.
 | Limit | Detail | Arrives |
 |---|---|---|
 | **`ListMultipartUploads`** | Returns `NotImplemented`, and will keep doing so. The upload ids this gateway issues are sealed tokens carrying the data key and the manifest id (ADR-006); neither can be reconstructed from the provider's listing, so the call could only return ids no client is able to use. Clients that abort their own uploads are unaffected — they hold the token already. | — |
-| **`UploadPartCopy`** | Returns `NotImplemented`. The copy machinery is in the upstream client, because rotation needs it, but the S3 operation is not wired up. Deferred with `CopyObject`. | — |
+| **Object tags** | `PutObjectTagging`, `DeleteObjectTagging` and `x-amz-tagging` on an upload return `NotImplemented`: a tag is a key and a value the provider stores in plaintext, and this gateway does not take plaintext through a side door. `GetObjectTagging` is forwarded and answers an empty set for anything the gateway wrote. Refused rather than ignored, so a client never believes its object carries tags it does not ([ADR-012](adr/ADR-012-copy-semantics.md)). | — |
+| **Copy cost above the multipart threshold** | A server-side copy of a small object moves no data — 1.2 KB over the wire for a 600 KB object. Above the client's multipart threshold (8 MiB for the AWS CLI) the client switches to `UploadPartCopy`, and that path *cannot* stay inside the provider: a part is a segment with its own salt, so the range is decrypted and re-encrypted on the way through. Correct, and not free ([ADR-012](adr/ADR-012-copy-semantics.md)). | — |
+| **Copying a `versionId`** | Returns `NotImplemented`. This build does not implement versioned reads, and copying the current version instead of the one asked for would be the wrong kind of helpful. | — |
 | **Part sizes** | Every part but the last must be a multiple of the chunk size (FORMAT §7.3). The defaults of every client above satisfy this; a client configured with, say, 5.5 MiB parts is refused at completion with a message naming the fix. | — |
 
 ### Conditional writes, for rotation

@@ -1,7 +1,8 @@
 # Threat Model
 
-**Status:** Current as of `v0.1.0`. Revised at every milestone that adds an
-attack surface.
+**Status:** Current as of `v0.1.0` plus server-side copy
+([ADR-012](adr/ADR-012-copy-semantics.md)). Revised at every milestone that adds
+an attack surface.
 
 Everything below is implemented and covered by the attack tests of section 7 --
 the segment format's own guarantees (chunk integrity, ordering, truncation
@@ -82,6 +83,14 @@ must reside in the same trust domain as the clients it serves.
   `HeadObject` and listings can report plaintext sizes without reading objects.
   It is a hint only: any read that touches the body takes the chunk size from the
   authenticated segment header and rejects an object whose metadata disagrees.
+
+What the provider does **not** see is object tags, because the gateway does not
+accept them. `x-amz-tagging` on an upload and the tagging sub-resource's write
+calls are refused with a message naming the reason: a tag is a key and a value
+the provider would store in the clear, and the list above is meant to stay a
+list of things that cannot be helped rather than one this gateway adds to
+([ADR-012](adr/ADR-012-copy-semantics.md)). Refused, not ignored — a client that
+sets a tag is told, instead of believing the object carries one.
 
 Content *is* hidden. Metadata is not. For workloads where the object names themselves are
 sensitive, this matters, and M6 lists deterministic name encryption as a stretch goal.

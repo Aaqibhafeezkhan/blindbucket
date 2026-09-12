@@ -234,6 +234,38 @@ func (c *Client) Passthrough(ctx context.Context, method, bucket string, query u
 	return &RawResponse{StatusCode: resp.StatusCode, Header: resp.Header, Body: raw}, nil
 }
 
+// ObjectPassthrough forwards a sub-resource request against an object whose
+// body blindbucket does not transform -- the tagging sub-resource, which carries
+// no object content.
+func (c *Client) ObjectPassthrough(
+	ctx context.Context, method, bucket, key string, query url.Values,
+) (*RawResponse, error) {
+	u := c.objectURL(bucket, key)
+	if len(query) > 0 {
+		u.RawQuery = query.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.URL = u
+	req.Host = u.Host
+
+	//nolint:bodyclose // closed by drainAndClose below.
+	resp, err := c.do(ctx, req, "ObjectPassthrough", method == http.MethodGet || method == http.MethodHead)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxListBody))
+	if err != nil {
+		return nil, fmt.Errorf("upstream: reading the response: %w", err)
+	}
+	return &RawResponse{StatusCode: resp.StatusCode, Header: resp.Header, Body: raw}, nil
+}
+
 // bucketURL builds the URL addressing a bucket itself.
 func (c *Client) bucketURL(bucket string) *url.URL {
 	u := *c.endpoint

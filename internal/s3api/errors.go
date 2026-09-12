@@ -37,6 +37,13 @@ var (
 	ErrEntityTooLarge = &Error{"EntityTooLarge",
 		"Your proposed upload exceeds the maximum allowed object size.",
 		http.StatusBadRequest}
+	// ErrPreconditionFailed answers a conditional request whose condition did
+	// not hold. On a copy it is the x-amz-copy-source-if-* headers, and it is a
+	// 412 rather than the 304 a GET would give: a write has no cached version
+	// for the client to fall back on.
+	ErrPreconditionFailed = &Error{"PreconditionFailed",
+		"At least one of the preconditions you specified did not hold.",
+		http.StatusPreconditionFailed}
 	ErrInvalidRange = &Error{"InvalidRange",
 		"The requested range is not satisfiable.", http.StatusRequestedRangeNotSatisfiable}
 	ErrAuthHeaderMalformed = &Error{"AuthorizationHeaderMalformed",

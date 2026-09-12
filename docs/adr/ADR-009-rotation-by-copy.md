@@ -117,9 +117,10 @@ model checks, or write a new one anyway.
   objects skipped for a conflict are picked up by the next one.
 - Objects the gateway did not write are counted and left alone. A bucket shared
   with other producers does not break a rotation.
-- The upstream client gains `CopyObject` and `UploadPartCopy`. Only the latter is
-  used today; `CopyObject` is there for the S3 `CopyObject` operation, which the
-  proxy still refuses — the copy *machinery* exists, the API surface does not.
+- The upstream client gains `CopyObject` and `UploadPartCopy`. Rotation uses only
+  the latter; both are now also used by the S3 `CopyObject` operation, which
+  [ADR-012](ADR-012-copy-semantics.md) added on the same machinery — rotation is
+  a copy whose destination is its source.
 - MinIO enforces both `x-amz-copy-source-if-match` and `If-Match` on completion.
   That was an open question in §11.2 and is now a measured entry in
   `COMPATIBILITY.md` rather than an assumption.

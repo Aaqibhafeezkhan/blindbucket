@@ -19,10 +19,16 @@ type Operation string
 // The operations this build recognises. Anything else is reported as
 // unsupported rather than guessed at.
 const (
-	OpPutObject    Operation = "PutObject"
+	OpPutObject Operation = "PutObject"
+	// OpCopyObject is a PUT carrying x-amz-copy-source: the body is empty and
+	// the bytes come from another object rather than from the request.
+	OpCopyObject   Operation = "CopyObject"
 	OpGetObject    Operation = "GetObject"
 	OpHeadObject   Operation = "HeadObject"
 	OpDeleteObject Operation = "DeleteObject"
+	// OpGetObjectTagging reads an object's tags. The gateway writes none, so
+	// for anything it stored the answer is an empty set.
+	OpGetObjectTagging Operation = "GetObjectTagging"
 
 	OpListObjectsV2 Operation = "ListObjectsV2"
 	OpListObjects   Operation = "ListObjects"
@@ -30,6 +36,7 @@ const (
 
 	OpCreateMultipartUpload   Operation = "CreateMultipartUpload"
 	OpUploadPart              Operation = "UploadPart"
+	OpUploadPartCopy          Operation = "UploadPartCopy"
 	OpCompleteMultipartUpload Operation = "CompleteMultipartUpload"
 	OpAbortMultipartUpload    Operation = "AbortMultipartUpload"
 	OpListParts               Operation = "ListParts"
@@ -47,9 +54,9 @@ const (
 // IsObject reports whether the operation addresses a single object.
 func (o Operation) IsObject() bool {
 	switch o {
-	case OpPutObject, OpGetObject, OpHeadObject, OpDeleteObject,
-		OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
-		OpAbortMultipartUpload, OpListParts:
+	case OpPutObject, OpCopyObject, OpGetObject, OpHeadObject, OpDeleteObject,
+		OpGetObjectTagging, OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy,
+		OpCompleteMultipartUpload, OpAbortMultipartUpload, OpListParts:
 		return true
 	default:
 		return false
@@ -59,8 +66,9 @@ func (o Operation) IsObject() bool {
 // IsMultipart reports whether the operation is part of a multipart upload.
 func (o Operation) IsMultipart() bool {
 	switch o {
-	case OpCreateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
-		OpAbortMultipartUpload, OpListParts, OpListMultipartUploads:
+	case OpCreateMultipartUpload, OpUploadPart, OpUploadPartCopy,
+		OpCompleteMultipartUpload, OpAbortMultipartUpload, OpListParts,
+		OpListMultipartUploads:
 		return true
 	default:
 		return false
@@ -223,6 +231,7 @@ var objectQueryParams = map[string]bool{
 	"partNumber":         true,
 	"max-parts":          true,
 	"part-number-marker": true,
+	"tagging":            true,
 }
 
 // routeObject handles requests against a single object.
@@ -249,6 +258,10 @@ func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 	// not fall through to the plain-object path: a PUT carrying ?partNumber=1 and
 	// an empty upload id would then be served as PutObject, storing one part's
 	// bytes as the whole object.
+	if _, tagging := query["tagging"]; tagging {
+		return routeTagging(r, bucket, key)
+	}
+
 	_, initiating := query["uploads"]
 	_, hasUploadID := query["uploadId"]
 	_, hasPartNumber := query["partNumber"]
@@ -261,7 +274,36 @@ func routeObject(r *http.Request, bucket, key string) (Request, *Error) {
 		return Request{Bucket: bucket, Key: key, Op: op},
 			ErrNotImplemented.WithMessage("method %s is not implemented for objects", r.Method)
 	}
+	// A PUT with a copy source is a different operation with the same method
+	// and path: no body arrives, and the handler reads from another object
+	// instead. Telling them apart here keeps the body-reading path free of a
+	// case where there is no body.
+	if op == OpPutObject && r.Header.Get("X-Amz-Copy-Source") != "" {
+		op = OpCopyObject
+	}
 	return Request{Op: op, Bucket: bucket, Key: key}, nil
+}
+
+// routeTagging classifies the object tagging sub-resource.
+//
+// Reading is forwarded to the provider, because that is where tags live and
+// this gateway never writes any. Writing is refused rather than quietly
+// accepted: a tag is a key and a value the provider stores in the clear, and a
+// gateway whose whole claim is that the provider sees only ciphertext must not
+// take plaintext in through a side door. The AWS CLI asks for an object's tags
+// before a server-side copy, which is why reading it has to work at all.
+func routeTagging(r *http.Request, bucket, key string) (Request, *Error) {
+	req := Request{Bucket: bucket, Key: key}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		req.Op = OpGetObjectTagging
+		return req, nil
+	case http.MethodPut, http.MethodDelete:
+		return unsupported(req), ErrNotImplemented.WithMessage(
+			"object tags are not accepted: the provider would store them in plaintext")
+	}
+	return unsupported(req), ErrNotImplemented.WithMessage(
+		"method %s is not implemented for the tagging sub-resource", r.Method)
 }
 
 // routeMultipart classifies the five object-level multipart operations.
@@ -297,14 +339,14 @@ func routeMultipart(r *http.Request, bucket, key string, initiating bool, upload
 			return unsupported(req), apiErr
 		}
 		// UploadPartCopy: a part whose bytes come from another object rather
-		// than from the request body. The copy machinery exists in
-		// internal/upstream, because rotation needs it, but the S3 operation is
-		// not wired up; it is deferred with CopyObject.
+		// than from the request body. Same method, same path, no body -- only
+		// the copy source tells them apart.
+		req.PartNumber = number
 		if r.Header.Get("X-Amz-Copy-Source") != "" {
-			return unsupported(req), ErrNotImplemented.WithMessage(
-				"UploadPartCopy is not implemented in this build")
+			req.Op = OpUploadPartCopy
+		} else {
+			req.Op = OpUploadPart
 		}
-		req.Op, req.PartNumber = OpUploadPart, number
 		return req, nil
 
 	case http.MethodPost:

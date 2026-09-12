@@ -387,13 +387,56 @@ func TestRouteMultipartRefusesMalformedRequests(t *testing.T) {
 // UploadPartCopy is a part whose bytes come from another object. It is deferred
 // along with CopyObject, and until then it must be refused rather than treated as
 // an ordinary part upload with an empty body.
-func TestRouteRefusesUploadPartCopy(t *testing.T) {
+// A part upload and a part copy are the same method on the same path, and only
+// the copy source tells them apart. Routing the copy as an ordinary UploadPart
+// would store an empty body as that part.
+func TestRouteUploadPartCopy(t *testing.T) {
 	t.Parallel()
 
 	r := request(t, http.MethodPut, "/bucket/key?partNumber=1&uploadId=tok")
 	r.Header.Set("X-Amz-Copy-Source", "/other/source")
-	_, err := Route(r, "")
-	if err == nil || err.Code != "NotImplemented" {
-		t.Fatalf("got %v, want NotImplemented", err)
+	req, err := Route(r, "")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if req.Op != OpUploadPartCopy {
+		t.Errorf("Op = %s, want %s", req.Op, OpUploadPartCopy)
+	}
+	if req.PartNumber != 1 {
+		t.Errorf("PartNumber = %d, want 1", req.PartNumber)
+	}
+
+	plain := request(t, http.MethodPut, "/bucket/key?partNumber=1&uploadId=tok")
+	req, err = Route(plain, "")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if req.Op != OpUploadPart {
+		t.Errorf("without a copy source, Op = %s, want %s", req.Op, OpUploadPart)
+	}
+}
+
+// The same distinction one level up: a PUT of an object with a copy source is
+// CopyObject, not PutObject.
+func TestRouteCopyObject(t *testing.T) {
+	t.Parallel()
+
+	r := request(t, http.MethodPut, "/bucket/key")
+	r.Header.Set("X-Amz-Copy-Source", "/other/source")
+	req, err := Route(r, "")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if req.Op != OpCopyObject {
+		t.Errorf("Op = %s, want %s", req.Op, OpCopyObject)
+	}
+
+	plain := request(t, http.MethodPut, "/bucket/key")
+	req, err = Route(plain, "")
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if req.Op != OpPutObject {
+		t.Errorf("without a copy source, Op = %s, want %s", req.Op, OpPutObject)
 	}
 }

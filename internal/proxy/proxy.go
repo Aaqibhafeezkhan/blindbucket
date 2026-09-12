@@ -143,12 +143,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch req.Op {
 	case s3api.OpPutObject:
 		err = p.putObject(w, r, req, authResult, log)
+	case s3api.OpCopyObject:
+		err = p.copyObject(w, r, req, authResult, log)
 	case s3api.OpGetObject:
 		err = p.getObject(w, r, req, log)
 	case s3api.OpHeadObject:
 		err = p.headObject(w, r, req, log)
 	case s3api.OpDeleteObject:
 		err = p.deleteObject(w, r, req, log)
+	case s3api.OpGetObjectTagging:
+		err = p.getObjectTagging(w, r, req, log)
 	case s3api.OpListObjectsV2, s3api.OpListObjects:
 		err = p.listObjects(w, r, req, log)
 	case s3api.OpDeleteObjects:
@@ -157,6 +161,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = p.createMultipartUpload(w, r, req, log)
 	case s3api.OpUploadPart:
 		err = p.uploadPart(w, r, req, authResult, log)
+	case s3api.OpUploadPartCopy:
+		err = p.uploadPartCopy(w, r, req, authResult, log)
 	case s3api.OpCompleteMultipartUpload:
 		err = p.completeMultipartUpload(w, r, req, log)
 	case s3api.OpAbortMultipartUpload:
