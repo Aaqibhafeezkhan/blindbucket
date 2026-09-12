@@ -91,6 +91,22 @@ COUNT ?= 100000
 ref-diff:
 	cd ref/python && python3 difftest.py --count $(COUNT)
 
+# --- Demo recording (demo/) --------------------------------------------------
+
+# The terminal recording CONCEPT.md section 20 asks for. demo/README.md has the
+# asciinema and agg invocations and the reason the terminal size matters.
+.PHONY: demo-setup
+demo-setup:
+	demo/setup.sh
+
+.PHONY: demo
+demo:
+	demo/demo.sh
+
+.PHONY: demo-stop
+demo-stop:
+	demo/setup.sh stop
+
 # --- Release --------------------------------------------------------------
 
 # Validate the release configuration and build everything locally without

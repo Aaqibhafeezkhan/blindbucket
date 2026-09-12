@@ -15,6 +15,10 @@ coverage.*
 # Benchmark results
 /bench/results/
 
+# Demo state: the MinIO config, keyring, gateway log and payload that demo/setup.sh
+# creates. The scripts and the recording itself are committed; what they generate is not.
+/demo/.state/
+
 # TLA+ tools, downloaded by `make tla-tools`. The model and its translation are
 # committed; the 2 MB jar is not.
 /.tools/

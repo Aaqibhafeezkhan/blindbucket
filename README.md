@@ -4,7 +4,20 @@
 Clients speak ordinary S3. The storage provider only ever sees ciphertext — never plaintext, never keys.
 
 [![CI](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml/badge.svg)](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/LennardGeissler/blindbucket)](https://goreportcard.com/report/github.com/LennardGeissler/blindbucket)
+[![Release](https://img.shields.io/github/v/release/LennardGeissler/blindbucket?label=release)](https://github.com/LennardGeissler/blindbucket/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+<p align="center">
+  <img src="demo/demo.gif" width="880"
+       alt="A 1 GiB file uploaded through the gateway with the AWS CLI. mc, talking to MinIO directly, then shows a BLBK header followed by ciphertext at the same offset that reads as text on disk, and the data key wrapped in the object metadata. The download through the gateway returns an identical SHA-256. After one flipped bit in the stored ciphertext, the download fails with IntegrityCheckFailed instead of returning data.">
+</p>
+
+<p align="center"><sub>
+  A gigabyte through the gateway, what the provider is left holding, and what it gets for
+  changing one bit of it. Every command is real — the scripts are in <a href="demo/">demo/</a>,
+  as <code>make demo</code>.
+</sub></p>
 
 > **Status: `v0.1.0` — usable.** Standard S3 clients round-trip through the
 > gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
@@ -26,6 +39,50 @@ decrypted in the stream. For the client, only the endpoint changes:
 ```
 aws s3 cp big.tar.zst s3://backups/ --endpoint-url http://localhost:9000
 ```
+
+```mermaid
+flowchart LR
+    subgraph T[Your trust boundary]
+        C[Client<br/>AWS CLI · boto3 · rclone · mc] -->|S3 API · SigV4<br/>plaintext| P[blindbucket]
+        P <--> K[(Keyring<br/>root key · KEKs)]
+    end
+    P -->|S3 API · SigV4<br/>ciphertext only| S[(S3 · R2 · MinIO · B2)]
+```
+
+The boundary drawn around those three is the whole claim: the keyring holds the
+key-encryption keys, each object carries its own data key wrapped under one of them, and
+the root key that opens the keyring comes from outside the process. None of it ever
+crosses the arrow leaving the box.
+
+<details>
+<summary>What happens inside a <code>PutObject</code></summary>
+
+The upload is a single pass with no spooling, which constrains the order of
+everything else: the body has to be signed, encrypted and forwarded while it is still
+arriving, and the client's checksum only verifies once the last byte has been seen. So
+the last chunk is held back until it does — the one place where the gateway buffers on
+purpose, and the reason a rejected upload leaves nothing readable upstream
+([ADR-005](docs/adr/ADR-005-checksums.md)).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as blindbucket
+    participant S as Provider
+    C->>P: PUT /bucket/key (SigV4, plaintext)
+    P->>P: verify signature, generate and wrap a data key
+    P->>S: PUT (re-signed, computed Content-Length, wrapped key in metadata)
+    loop per chunk
+        C-->>P: plaintext
+        P-->>S: ciphertext
+    end
+    P->>P: verify the client's checksum
+    P-->>S: last chunk, only once the checksum holds
+    S->>P: 200 OK, ETag
+    P->>C: 200 OK, ETag, verified checksum
+```
+
+</details>
 
 The interesting part is not "AES around S3". It is what breaks when you try: authenticated
 encryption for objects up to 5 TiB at constant memory, range requests over ciphertext,
@@ -311,6 +368,7 @@ memory is a function of streams in flight and not of object size.
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
 | [ref/python/](ref/python/) | A second decoder written from the format spec alone, and the differential test that compares it against the Go one. |
 | [bench/](bench/) | Benchmark scripts, the figures they produce, and the methodology notes that came out of getting them wrong first. |
+| [demo/](demo/) | The end-to-end demo, as scripts: upload through the gateway, ciphertext at the provider, identical hash back, and `tamper.sh` — the hostile provider, by hand, in one command. |
 | [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
 | [CHANGELOG.md](CHANGELOG.md) | What each release contains, and what it does not. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
@@ -402,6 +460,8 @@ make fuzz           # 30s per fuzz target
 make bench          # micro-benchmarks
 make vuln           # govulncheck
 make tla            # model-check spec/tla (needs a JRE; downloads tla2tools.jar)
+make demo-setup     # MinIO, keyring, config, gateway and a payload for demo/
+make demo           # run the end-to-end demo (see demo/README.md)
 
 docker compose up -d   # local MinIO on :9002, console on :9091
 ```
