@@ -28,11 +28,25 @@ jobs:
           go-version-file: go.mod
       - run: go build ./...
       - run: go test -race -count=1 ./...
+
+  # Separate, and on current Go rather than the module's floor: govulncheck
+  # itself needs a newer toolchain than this module declares, and GOTOOLCHAIN is
+  # local so nothing silently downloads one. It still analyses the module as
+  # declared. ci.yml does the same thing for the same reason -- and the first
+  # version of this file did not, which is what the v0.1.0 tag ran into.
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   release:
     name: goreleaser
-    needs: verify
+    needs: [verify, vuln]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
