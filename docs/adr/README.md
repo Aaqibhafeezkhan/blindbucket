@@ -28,5 +28,5 @@ down, but not yet wired into the gateway. It is here because the decisions it re
 already constrain the code that exists.
 
 ADR numbers reflect the order the decisions were identified, not the order they are made.
-010 and 011 were added in concept version 0.2; 011 was decided in M0 because it governs what
+010 and 011 were added in design version 0.2; 011 was decided in M0 because it governs what
 may enter the repository from the start, while 010 waited for the model checker in M3.5.

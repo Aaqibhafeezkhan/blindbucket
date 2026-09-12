@@ -205,5 +205,5 @@ func writeKeyring(path string, data []byte) error {
 }
 
 // defaultKID names a key after the month it was created, which is the shape the
-// rotation workflow in CONCEPT.md section 11.2 assumes.
+// rotation workflow of ADR-009 assumes.
 func defaultKID() string { return time.Now().UTC().Format("2006-01") }

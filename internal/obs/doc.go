@@ -1,6 +1,5 @@
-// Package obs provides the metrics of CONCEPT.md section 17.1 and the admin
-// listener of section 17.3: /metrics, /healthz, /readyz and, behind a flag,
-// /debug/pprof.
+// Package obs provides the gateway's metrics and its admin listener:
+// /metrics, /healthz, /readyz and, behind a flag, /debug/pprof.
 //
 // Redaction of key material is not here. It lives with the types that hold the
 // material -- keys.DEK and auth.Client implement slog.LogValuer -- because a

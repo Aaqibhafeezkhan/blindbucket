@@ -5,7 +5,7 @@
 machine-readable file, but `--analyze.out` needs a writable bind mount into the
 container, which is one more thing to get wrong on a machine where Docker does
 not share the directory in question. The text is stable and carries everything
-CONCEPT.md section 12.5 asks for: throughput, p50, p90 and p99.
+the benchmark plan asks for: throughput, p50, p90 and p99.
 
 Usage:
     python3 bench/plot/summarise.py <results-dir>

@@ -84,7 +84,7 @@ ref-vectors:
 	cd ref/python && python3 test_vectors.py
 
 # Differential test against the Go decoder. COUNT is the number of inputs;
-# CONCEPT.md asks for at least 100000, which takes a few minutes.
+# The floor is 100000, which takes a few minutes.
 COUNT ?= 100000
 
 .PHONY: ref-diff
@@ -93,7 +93,7 @@ ref-diff:
 
 # --- Demo recording (demo/) --------------------------------------------------
 
-# The terminal recording CONCEPT.md section 20 asks for. demo/README.md has the
+# The terminal recording the README leads with. demo/README.md has the
 # asciinema and agg invocations and the reason the terminal size matters.
 .PHONY: demo-setup
 demo-setup:

@@ -141,7 +141,7 @@ set, a correct client detects a short read and discards the result. A client tha
 short reads keeps a truncated file — that is a client defect, but it is a real consequence
 and is documented rather than hidden.
 
-An open design question (`CONCEPT.md` §21) is whether small ranges should be fully decrypted
+An open design question is whether small ranges should be fully decrypted
 into a buffer before the status is sent, trading up to 1 MiB per stream for a clean error
 response instead of a connection abort.
 
@@ -200,7 +200,7 @@ AES-GCM uses hardware acceleration with constant-time behaviour on the platforms
 ## 7. Verification
 
 Each guarantee in §3 is backed by tests that simulate an active provider (A2) and require an
-error rather than plaintext. The catalogue is in `CONCEPT.md` §16.2 and covers chunk-level
+error rather than plaintext. The catalogue covers chunk-level
 tampering, header manipulation, object and metadata swapping, multipart reordering, token
 forgery, checksum mismatch and authentication failures.
 

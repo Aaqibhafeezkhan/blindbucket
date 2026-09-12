@@ -1,6 +1,6 @@
 # blindbucket as a sidecar: one instance per application, listening on localhost.
 #
-# This is the deployment shape CONCEPT.md section 14 calls the sidecar model, and
+# This is the sidecar deployment shape, and
 # it is the one that makes the plaintext hop safe without TLS: the application
 # talks to 127.0.0.1 inside its own pod, so the plaintext never crosses a network
 # interface. Any other shape needs TLS between client and gateway, or it gives up

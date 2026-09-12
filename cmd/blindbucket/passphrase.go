@@ -11,8 +11,8 @@ import (
 )
 
 // passphraseEnv names the environment variable a passphrase may be supplied in.
-// CONCEPT.md section 13.1 requires that secrets are referenced through the
-// environment or a file, never written into configuration.
+// Secrets are referenced through the environment or a file, never written
+// into configuration.
 const passphraseEnv = "BLINDBUCKET_PASSPHRASE"
 
 // passphraseFlags are the ways a command can be told where to find the

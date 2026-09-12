@@ -79,7 +79,7 @@ func (h *harness) mustRead(t *testing.T, key, what string) []byte {
 	return body
 }
 
-// Scenario 1 of spec/tla/README.md, the second race of CONCEPT.md 10.8.
+// Scenario 1 of spec/tla/README.md, the second race ADR-010 records.
 //
 // Version 0.1 had a completion delete "the other manifests of this key". TLC
 // reaches an unreadable object in eleven states: u1 completes, u2 writes its
@@ -135,7 +135,7 @@ func TestIntegrationRaceCleanupAgainstConcurrentUpload(t *testing.T) {
 	}
 }
 
-// Scenario 2 of spec/tla/README.md, the first race of CONCEPT.md 10.8.
+// Scenario 2 of spec/tla/README.md, the first race ADR-010 records.
 //
 // Version 0.1's gc listed the manifests, read the current id and deleted the
 // rest, with no regard for uploads in flight. TLC's trace: an upload writes its

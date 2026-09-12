@@ -374,7 +374,7 @@ func (p *Proxy) headObject(w http.ResponseWriter, r *http.Request, req s3api.Req
 
 // deleteObject removes an object and, if it was a multipart one, its manifest.
 //
-// The order is rule R3 from CONCEPT.md section 10.8, and it is the same shape as
+// The order is rule R3 from ADR-010, and it is the same shape as
 // a completion: observe what is visible, act, and only then delete the manifest
 // that was observed -- never "the manifests of this key", and never one that was
 // not seen beforehand. The model in spec/tla/Multipart.tla covers this path as

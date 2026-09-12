@@ -59,8 +59,8 @@ func NoSuchUpload(err error) bool {
 // PreconditionFailed reports whether err is an upstream 412.
 //
 // A conditional CompleteMultipartUpload answers with this when the object
-// changed under a rotation, which is the mechanism that keeps I2 (CONCEPT.md
-// section 11.2).
+// changed under a rotation, which is the mechanism that keeps I2
+// (docs/adr/ADR-009-rotation-by-copy.md).
 func PreconditionFailed(err error) bool {
 	ae, ok := AsAPIError(err)
 	return ok && ae.StatusCode == http.StatusPreconditionFailed

@@ -1,9 +1,9 @@
-# Distroless, nonroot, no shell: CONCEPT.md section 17.4.
+# Distroless, nonroot, no shell.
 #
 # The binary is static because the crypto is Go's own -- no cgo, so nothing to
 # link against at runtime. That is what makes `distroless/static` enough, and it
 # is one of the reasons ADR-011 keeps the core in Go rather than reaching for a
-# C or Rust library (see CONCEPT.md 15.2).
+# C or Rust library (see ADR-011).
 #
 # This file builds from source. Release images come from goreleaser, which builds
 # the binary once and copies it in; see .goreleaser.yaml.

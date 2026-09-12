@@ -12,7 +12,7 @@ A multipart object is stored as one segment per part. Each segment is authentica
 own, but nothing binds the segments into a whole, so a provider could serve an object with
 parts missing or reordered and every individual tag would still verify. The manifest closes
 that gap: a signed sidecar object listing the parts, named by a manifest id that the object's
-own metadata points at (§10.6).
+own metadata points at (`FORMAT.md` §10.1).
 
 That turns an integrity question into a lifecycle question. The manifest is a second object,
 written and deleted by requests that do not coordinate with each other, and the proxy is
@@ -24,8 +24,8 @@ object that fails I1 is not lost — the ciphertext is intact and the data key s
 but every `GetObject` against it fails. From the client's side that is indistinguishable from
 data loss.
 
-Version 0.1 of the concept got this wrong twice, in both cases by deleting a manifest that
-some other request was about to need (§10.8): a `gc` pass removing the manifest of an upload
+The first version of the design got this wrong twice, in both cases by deleting a manifest that
+some other request was about to need: a `gc` pass removing the manifest of an upload
 that had not completed yet, and a completing upload deleting "all other manifests of this
 key", including those of uploads still in flight. Neither bug is visible in any single
 request. Both need two requests interleaved in a particular way, which is exactly what code
@@ -35,7 +35,7 @@ The replacement rules R1–R4 were also derived by reasoning. So was version 0.1
 
 ## Decision
 
-Adopt R1–R4 as specified in §10.8, and **check them with a model checker before implementing
+Adopt R1–R4 as specified below, and **check them with a model checker before implementing
 them**, rather than after.
 
 - **R1 — fresh manifest id.** Every operation that makes a multipart object visible mints a
@@ -53,11 +53,11 @@ them**, rather than after.
 visible object version, the set of manifests, the open uploads — under three concurrent
 uploads, a single-part PUT, a `DeleteObject`, a rotation and one `gc` pass, all on the same
 key, with a crash possible after every step and the bucket lifecycle rule free to abort any
-open upload at any moment. TLC checks I1 and the rotation invariant I2 (§11.2) exhaustively:
+open upload at any moment. TLC checks I1 and the rotation invariant I2 exhaustively:
 about 38.5 million distinct states, no counterexample.
 
 Three further configurations put the flawed rules back and **require** TLC to produce a
-counterexample. A model that cannot find the bugs the concept already knows about is not
+counterexample. A model that cannot find the bugs the design already knows about is not
 evidence about the ones it does not, so those runs failing to fail is a CI failure.
 [`spec/tla/README.md`](../../spec/tla/README.md) has each counterexample written out as a
 scenario for the M4 integration tests.
@@ -70,7 +70,7 @@ uploads, finds none, and *then* lists — so the listing picks up the manifest o
 created after the check, about which the check said nothing. Listing first is what gives the
 check its meaning: every manifest in the listing was written before the check ran.
 
-The reasoning in §10.8 is correct, but nothing in it flags that order as load-bearing, and
+The reasoning behind R4 is correct, but nothing in it flags that order as load-bearing, and
 nothing in the eventual Go code would either. Swapping two calls that only read is the kind
 of edit that passes review. `MCGcOrder` is now a regression test against exactly that edit,
 and the Go functions for completion, delete, rotation and `gc` carry comments naming the
@@ -83,7 +83,7 @@ model actions they implement, so a reordering shows up in review against the mod
 - **The minimum age in R4 step 4.** That threshold guards against the upstream consistency
   assumptions failing; the model assumes they hold, so including it would make R4 look safe
   for a reason unrelated to its ordering. It stays a second line of defence.
-- **The upstream assumptions themselves** (§10.8): read-after-write consistency for HEAD,
+- **The upstream assumptions themselves**: read-after-write consistency for HEAD,
   LIST and `ListMultipartUploads`, and a completed or aborted upload id never making an
   object visible again. These are inputs to the model. AWS S3 guarantees them; for MinIO and
   R2 they belong in `COMPATIBILITY.md`, which is measurement, not model checking.
@@ -107,7 +107,7 @@ windows, but it cannot report their absence, and the windows are a few calls wid
 
 **A distributed lock or a lease per key.** Correct, and it throws away the property that
 makes the design worth building: the proxy holds no state, so instances can be added,
-removed and restarted mid-upload, and no load balancer needs sticky sessions (§10.7). It
+removed and restarted mid-upload, and no load balancer needs sticky sessions. It
 also adds a store to operate and a new failure mode — lock expiry under load — in exchange
 for a problem that turned out to be solvable by ordering four calls correctly.
 

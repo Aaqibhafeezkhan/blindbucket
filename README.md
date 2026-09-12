@@ -372,7 +372,6 @@ memory is a function of streams in flight and not of object size.
 | [demo/](demo/) | The end-to-end demo, as scripts: upload through the gateway, ciphertext at the provider, identical hash back, and `tamper.sh` — the hostile provider, by hand, in one command. |
 | [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
 | [CHANGELOG.md](CHANGELOG.md) | What each release contains, and what it does not. |
-| [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
 ## Roadmap
 
@@ -424,7 +423,7 @@ sense that matters, is [ADR-012](docs/adr/ADR-012-copy-semantics.md).
 
 ## A race in my own design, and the machine that found it
 
-Version 0.2 of the concept found two race conditions in version 0.1's manifest lifecycle.
+Revising the design turned up two race conditions in the first version's manifest lifecycle.
 Both end the same way: a multipart object that is visible but has no manifest. The data is
 still there and still decryptable, but the proxy refuses to serve an object it cannot verify
 as whole, so every `GetObject` fails. Neither bug lives in a single request — both need two

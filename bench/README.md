@@ -9,7 +9,7 @@ Published figures and the macro comparison table live in
 
 ## What is here
 
-| Script | Measures | CONCEPT.md 12.5 row |
+| Script | Measures | Benchmark plan row |
 |---|---|---|
 | `rss-sample.sh` | Resident set of a command over time, separating the one-time Argon2id spike from the steady state while data streams | memory (CLI) |
 | `gateway-memory.sh` | Resident set of a **running gateway** while a large object streams through it, end to end over HTTP | memory (gateway) |

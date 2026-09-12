@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// benchSizes are the chunk sizes from CONCEPT.md section 12.5: 16, 64 and
+// benchSizes are the chunk sizes of the benchmark plan in bench/: 16, 64 and
 // 256 KiB. 64 KiB is the default.
 var benchSizes = []struct {
 	name  string

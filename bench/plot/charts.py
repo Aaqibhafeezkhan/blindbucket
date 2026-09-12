@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the benchmark diagrams as SVG, using nothing but the standard library.
 
-CONCEPT.md section 15.2 penciled in matplotlib here, under its weakest
+The original plan penciled in matplotlib here, under its weakest
 justification -- "convenience". Two charts do not need a plotting stack: the
 output is a few hundred lines of SVG, and writing it directly means anyone who
 can run `python3` can reproduce the figures, with no wheel to install and nothing

@@ -15,7 +15,7 @@ jobs:
   # The reference decoder in ref/python was written from docs/FORMAT.md alone.
   # Its value is entirely in being compared: a disagreement means the
   # specification is ambiguous or one of the two is wrong, and either is worth
-  # knowing. 100 000 inputs is the number CONCEPT.md asks for and takes a few
+  # knowing. 100 000 inputs is the floor and takes a few
   # minutes; the nightly budget allows more.
   differential:
     name: Differential decoder (Go vs Python)

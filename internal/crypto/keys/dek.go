@@ -24,7 +24,7 @@ func (DEK) String() string { return "[REDACTED]" }
 //
 // A DEK is never derived from anything the storage provider chooses -- notably
 // not from an upstream UploadId, which a provider could repeat in order to force
-// two uploads to share a key. See CONCEPT.md section 10.3.
+// two uploads to share a key. See docs/adr/ADR-006-upload-token.md.
 func NewDEK() (DEK, error) {
 	var dek DEK
 	if _, err := rand.Read(dek[:]); err != nil {

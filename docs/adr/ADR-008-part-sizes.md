@@ -101,5 +101,5 @@ completion is the same rule made honest.
 - The whole-object plaintext size is recoverable from `(S, M)` alone, which keeps
   `HeadObject` and `ListObjectsV2` at one request each.
 - `UploadPartCopy` (M5) must preserve the original part boundaries when copying a
-  multipart object, or the copy would break the rule. This is already how §11.1
-  specifies the copy path.
+  multipart object, or the copy would break the rule. The copy path is already
+  specified that way.

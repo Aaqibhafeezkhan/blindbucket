@@ -19,7 +19,7 @@ var ErrWriterClosed = errors.New("stream: write to closed EncryptWriter")
 // That property is load-bearing beyond this package: the proxy verifies the
 // client's end-to-end checksum in the window between the last full chunk and
 // Close, so a mismatching checksum can abort the upstream request before a
-// complete body has ever been sent. See CONCEPT.md section 9.3.
+// complete body has ever been sent. See docs/adr/ADR-005-checksums.md.
 //
 // An EncryptWriter is not safe for concurrent use.
 type EncryptWriter struct {

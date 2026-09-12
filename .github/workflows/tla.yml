@@ -1,6 +1,6 @@
 name: Formal model
 
-# The model in spec/tla covers the manifest coordination (CONCEPT.md 10.8, 11.2),
+# The model in spec/tla covers the manifest coordination (ADR-010, ADR-009),
 # not the Go code, so it runs when the model or the coordination logic changes
 # rather than on every push. MCFixed explores ~38.5 million states and is the
 # reason for the path filter.

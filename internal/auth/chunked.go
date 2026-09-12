@@ -49,7 +49,7 @@ var ErrChunkSignature = errors.New("auth: chunk signature does not match")
 // to be good -- which is safe here because of how the write path is ordered: the
 // encrypter withholds its final chunk until Close, so a failure at any point
 // means the upstream request never completes and no object is created. See
-// CONCEPT.md section 9.3.
+// docs/adr/ADR-005-checksums.md.
 type ChunkedReader struct {
 	src  *bufio.Reader
 	mode PayloadMode

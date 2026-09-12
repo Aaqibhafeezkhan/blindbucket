@@ -37,7 +37,7 @@ const (
 	KindSize      = "size"
 )
 
-// Metrics is the instrument panel of CONCEPT.md section 17.1.
+// Metrics is the gateway's instrument panel.
 //
 // A nil *Metrics is usable and records nothing, so a caller that was built
 // without observability does not need a branch at every call site.

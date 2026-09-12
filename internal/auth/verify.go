@@ -11,7 +11,7 @@ import (
 // verified while it streams.
 type PayloadMode int
 
-// The payload modes from CONCEPT.md section 9.2.
+// The payload modes a client may signal in x-amz-content-sha256.
 const (
 	// PayloadHashed means x-amz-content-sha256 carries the SHA-256 of the whole
 	// body, which is checked as the body streams through.

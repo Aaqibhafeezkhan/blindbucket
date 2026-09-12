@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// CONCEPT.md 12.3 asks for deadlines renewed per chunk rather than one global
+// Deadlines are renewed as bytes move rather than set once as a global
 // WriteTimeout. The two tests below are the two halves of that rule, and the
 // second is the one that matters: a guard that also kills healthy transfers
 // would be worse than no guard at all.

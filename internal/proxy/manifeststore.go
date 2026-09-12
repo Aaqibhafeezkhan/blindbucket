@@ -20,7 +20,7 @@ const maxManifestBytes = 1 << 20
 
 // writeManifest stores a manifest as a sidecar object.
 //
-// This is step 3 of the completion order in CONCEPT.md section 10.6, and rule R2:
+// This is step 3 of the completion order in FORMAT.md 10.7, and rule R2:
 // the manifest exists before the operation makes the object visible, never
 // after. It does not disturb the object currently visible, because that object's
 // metadata names a different manifest id.

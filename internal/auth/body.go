@@ -20,7 +20,7 @@ const DecodedLengthHeader = "X-Amz-Decoded-Content-Length"
 // the whole design work. The encrypter downstream withholds its final chunk
 // until Close, so a checksum that fails here aborts the upstream request before
 // a complete body was ever sent, and no object is created -- without anything
-// having been buffered. See CONCEPT.md section 9.3.
+// having been buffered. See docs/adr/ADR-005-checksums.md.
 type BodyReader struct {
 	src       io.Reader
 	chunked   *ChunkedReader

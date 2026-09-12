@@ -3,7 +3,6 @@
 **Status:** Accepted
 **Date:** 2026-09-11
 **Milestone:** M0
-**Reference:** [`CONCEPT.md`](../../CONCEPT.md) §15.2
 
 ## Context
 
@@ -13,12 +12,12 @@ failure is just as real — refusing every non-Go tool on principle, and then ve
 concurrent protocols with integration tests that cannot actually cover the interleavings,
 or claiming client compatibility without ever running the client.
 
-Three concrete needs surfaced while writing the concept:
+Three concrete needs surfaced while writing the design:
 
 1. The compatibility matrix claims boto3 works. Only boto3 can substantiate that.
-2. §10.8 describes coordination rules (R1–R4) whose correctness depends on how operations
+2. The coordination rules (R1–R4) have a correctness that depends on how operations
    on several instances interleave, including crashes at every step. Version 0.1 of the
-   concept contained two races in exactly this area that ordinary review did not catch.
+   design contained two races in exactly this area that ordinary review did not catch.
 3. `FORMAT.md` claims to be implementable from the document alone. Nothing tests that claim
    as long as the only implementation is the one the document was written from.
 
@@ -59,7 +58,7 @@ form, or anything wanting statistics, would be the point to revisit it -- and to
 
 **Rust or C for the crypto core, via cgo.** The usual argument is performance. It does not
 apply: Go's AES-GCM uses hand-written assembly with hardware acceleration on amd64 and
-arm64, and §12.4 expects the network, not the cipher, to be the bottleneck — an expectation
+arm64, and the design expects the network, not the cipher, to be the bottleneck — an expectation
 the benchmarks in M5 will confirm or refute with numbers. The costs are concrete: cgo gives
 up the static binary, straightforward cross-compilation and the `distroless/static` image;
 it places an FFI boundary with unsafe code inside the most security-critical component; and
@@ -72,7 +71,7 @@ tests. If that motivation ever changes, the README should say so plainly rather 
 up language tourism as engineering.
 
 **No formal methods; cover the races with integration tests.** Rejected: the two races in
-concept 0.1 only appear in specific interleavings across instances with crashes at specific
+design 0.1 only appear in specific interleavings across instances with crashes at specific
 points. Tests can reproduce an interleaving once it is known, but they are a poor instrument
 for discovering it. TLC enumerates the state space instead. Integration tests remain — they
 just get their scenarios from the counterexamples.
@@ -102,8 +101,8 @@ not a count of languages.
 
 - CI gains tool chains beyond Go: Python for the client tests, a JVM for TLC. Both run in
   containers, but they are additional failure modes in the pipeline.
-- TLA+ carries real learning cost, which is why M3.5 budgets 2–3 days and sits at position 7
-  of the cut list in `CONCEPT.md` §19.
+- TLA+ carries real learning cost, which is why M3.5 budgets 2–3 days and is among the
+  first things this project would cut under time pressure.
 - A model can drift away from the code it describes. Mitigations: the Go functions for
   Complete, Delete, rotation and `gc` name the corresponding model actions in comments,
   counterexamples become tests, and TLC runs whenever `spec/tla/` or the coordination logic

@@ -1,12 +1,13 @@
 # Formal model of the manifest coordination
 
 [`Multipart.tla`](Multipart.tla) models the coordination described in
-[CONCEPT.md](../../CONCEPT.md) §10.6, §10.8 and §11.2: what order the proxy makes its
+[ADR-010](../../docs/adr/ADR-010-manifest-lifecycle-under-concurrency.md) and
+[ADR-009](../../docs/adr/ADR-009-rotation-by-copy.md): what order the proxy makes its
 upstream calls in when several requests work on the same key at the same time, possibly on
 different instances, and any of them may die at any point.
 
 It exists because those rules — R1 to R4 — were derived by *reasoning*. Version 0.1 of the
-concept contained two race conditions that were also derived by reasoning, and they survived
+design contained two race conditions that were also derived by reasoning, and they survived
 being written down, read again, and reviewed. Argument is not evidence, so the rules are
 checked here before M4 turned them into Go.
 
@@ -28,7 +29,7 @@ therefore make R4 look safe for a reason that has nothing to do with its orderin
 the part that was never checked. The ordering argument stands on its own here, and the
 threshold remains a second line of defence rather than the first.
 
-**The upstream assumptions themselves** (§10.8) are assumptions of the model, not results of
+**The upstream assumptions themselves** are assumptions of the model, not results of
 it: read-after-write consistency for HEAD, LIST and `ListMultipartUploads`, and a completed
 or aborted upload id never making an object visible again. For AWS S3 these are guaranteed;
 for MinIO and R2 they belong in the compatibility matrix, not in TLC.
@@ -40,7 +41,7 @@ for MinIO and R2 they belong in the compatibility matrix, not in TLC.
   against it fails.
 - **I2** — rotation never replaces a newer version of an object with an older one.
 
-The liveness property §15.2 lists as optional — that orphaned manifests eventually disappear
+The liveness property listed as optional — that orphaned manifests eventually disappear
 under fairness — is **not** modelled. It would need a `gc` that loops rather than making one
 pass, plus fairness on the lifecycle rule, and liveness checking costs far more than the
 safety run. Both invariants above are safety properties, and orphaned manifests are a
@@ -50,7 +51,7 @@ keeps one around is still perfectly readable.
 ## Configurations
 
 Four of the five configurations are expected to **fail**. A model that cannot reproduce the
-two races the concept already knows about is too coarse to be evidence about the races it
+two races the design already knows about is too coarse to be evidence about the races it
 does not know about, so "no counterexample" is a failing result for those four.
 
 | Configuration | Rules | Expected |
@@ -171,7 +172,7 @@ that could still publish one of them would have been open at the time of the che
 first and the listing picks up manifests written afterwards, about which the check said
 nothing.
 
-This is the result that pays for the milestone. The argument for R4 in §10.8 is correct, but
+This is the result that pays for the milestone. The argument for R4 is correct, but
 nothing in it announces that the order of steps 1 and 2 is load-bearing, and nobody reading
 the finished Go code would either.
 
@@ -182,7 +183,7 @@ that did nothing at all cannot be mistaken for a pass that did the right thing.
 
 ### 4. Rotation without a conditional write — `MCUnconditionalRotate`
 
-`blindbucket rotate --allow-unconditional`, the mode §11.2 permits on upstreams that have no
+`blindbucket rotate --allow-unconditional`, the mode permitted on upstreams that have no
 conditional writes. Six states:
 
 | # | Who | Step | Result |
@@ -204,7 +205,7 @@ it has read the object, lets a client replace the object through the gateway, re
 requires the client's bytes to be the ones that survive and the rotation to report the object
 as skipped rather than rotated.
 
-With that, all four counterexamples have tests. Running it also answered a question §11.2 left
+With that, all four counterexamples have tests. Running it also answered a question the design left
 open: MinIO enforces both guards, and it is the copy rather than the completion that refuses
 first — `x-amz-copy-source-if-match` fails before any part is written. Both answer 412, and
 both mean the same thing to the caller.

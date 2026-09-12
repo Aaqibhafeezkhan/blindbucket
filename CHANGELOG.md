@@ -181,7 +181,7 @@ is closed.
 
 ### Verified
 
-**A formal model.** Concept version 0.1 contained two race conditions in the
+**A formal model.** The first version of the design contained two race conditions in the
 manifest lifecycle, both ending in an unreadable object. The rules that replace
 them are checked in TLA+ before the code implemented them: 38.5 million states,
 no counterexample, and four configurations that are *required* to produce one.

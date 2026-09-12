@@ -71,7 +71,7 @@ their metadata, undetected.
 
 - One KMS or Vault call per process start, not per request.
 - KEK rotation touches only metadata: re-wrap the DEK and write it back with a
-  server-side copy. No object bytes move (`CONCEPT.md` §11.2).
+  server-side copy. No object bytes move.
 - Compromise of one DEK exposes one object.
 - Because bucket and key are in the AAD, swapping objects together with their metadata is
   detected at unwrap time, before any plaintext is produced.

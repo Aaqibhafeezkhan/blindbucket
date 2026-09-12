@@ -160,7 +160,7 @@ func (p *Proxy) createMultipartUpload(
 // Each part attempt gets a fresh salt and therefore a fresh subkey, which is what
 // makes a client retry of the same part number safe: a repeated (key, nonce) pair
 // under GCM would be catastrophic, and this design makes one impossible whatever
-// the client does. See CONCEPT.md section 10.4.
+// the client does. See docs/FORMAT.md section 4.1.
 func (p *Proxy) uploadPart(
 	w http.ResponseWriter, r *http.Request, req s3api.Request, authResult *auth.Result, log *slog.Logger,
 ) *s3api.Error {

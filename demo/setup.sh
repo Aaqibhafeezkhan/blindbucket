@@ -2,7 +2,7 @@
 #
 # Prepare this machine for the demo recording in demo/demo.sh.
 #
-# The recording CONCEPT.md section 20 asks for is the thirty-second argument for
+# The recording is the thirty-second argument for
 # the whole project: a standard client uploads a large file through the gateway,
 # the provider is then shown holding ciphertext, and the download comes back with
 # an identical hash. None of that is interesting to watch being set up, so the

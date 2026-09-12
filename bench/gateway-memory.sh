@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The memory row of CONCEPT.md section 12.5: push a large object through a
+# The memory row of the benchmark plan: push a large object through a
 # running gateway and sample the gateway's resident set while it happens.
 #
 # This is the claim the whole streaming design exists for -- memory is a function

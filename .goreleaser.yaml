@@ -1,5 +1,4 @@
 # Release build: binaries, checksums, an SBOM and a distroless image.
-# See CONCEPT.md section 16 ("goreleaser: Binaries, Container-Image, Checksummen, SBOM").
 version: 2
 
 project_name: blindbucket

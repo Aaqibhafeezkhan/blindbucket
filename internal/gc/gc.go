@@ -9,7 +9,7 @@
 // Deleting them is the dangerous half. A manifest that looks orphaned may belong
 // to an upload that is about to complete, and removing it produces exactly the
 // failure invariant I1 forbids: a visible multipart object that nothing can read.
-// The order below is rule R4 from CONCEPT.md section 10.8, it is checked by the
+// The order below is rule R4 from ADR-010, it is checked by the
 // model in spec/tla/Multipart.tla, and two of its steps are load-bearing in ways
 // that are not obvious from reading them:
 //

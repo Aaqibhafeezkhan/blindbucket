@@ -77,8 +77,8 @@ the very signal being relied upon disappears.
 
 **Buffer only small objects** (say, under 1 MiB) so they always get a clean error.
 Genuinely attractive, since most objects are small and the memory cost is bounded.
-Deferred rather than rejected: it is an open question in `CONCEPT.md` section 21,
-and it interacts with the range-request design in M3. Doing it now would mean two
+Deferred rather than rejected: it is an open question, and it interacts with the
+range-request design in M3. Doing it now would mean two
 code paths before the second one exists.
 
 ## Consequences

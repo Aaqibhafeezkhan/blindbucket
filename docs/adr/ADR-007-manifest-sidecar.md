@@ -55,7 +55,7 @@ authenticate (it has no data key), and a key that does not hash back to the
 directory the manifest was found in is a forgery. SHA-256's collision resistance
 is what makes an unauthenticated field safe to act on there.
 
-**Why the id is in the metadata and not the path.** Rule R1 (§10.8) requires a
+**Why the id is in the metadata and not the path.** Rule R1 (ADR-010) requires a
 fresh manifest id for every operation that makes an object visible, so that a
 request can delete exactly the manifest it replaced without racing anything. That
 only works if the id belongs to the object *version*, which is what metadata is.

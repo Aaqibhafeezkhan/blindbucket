@@ -20,9 +20,9 @@ on every vector and on 100 000 mutated inputs. The two clarifications in §4.4 a
 §5.2 are what writing it turned up — neither changes the format, both state
 something that was previously only derivable.
 
-The design rationale lives in [`CONCEPT.md`](../CONCEPT.md) §8 and in
-[ADR-001](adr/ADR-001-segment-format.md) / [ADR-002](adr/ADR-002-key-hierarchy.md).
-Where this document and `CONCEPT.md` disagree, **this document wins**.
+The design rationale lives in [ADR-001](adr/ADR-001-segment-format.md) and
+[ADR-002](adr/ADR-002-key-hierarchy.md). Where this document and an ADR
+disagree, **this document wins**.
 
 ---
 
@@ -79,8 +79,8 @@ Root key            external: AWS KMS | Vault Transit | Argon2id(passphrase)
 ```
 
 A DEK MUST be generated with a CSPRNG and MUST NOT be derived from any value chosen
-by the storage provider (notably not from the upstream `UploadId`; see `CONCEPT.md`
-§10.3).
+by the storage provider (notably not from the upstream `UploadId`; see
+[ADR-006](adr/ADR-006-upload-token.md)).
 
 ### 3.1 Key identifiers
 
@@ -184,8 +184,8 @@ arrives or the stream is explicitly closed.
 This means **`Close` is the commit point of a segment.** A segment whose encoder was
 never closed is truncated and MUST fail to decrypt. blindbucket relies on this
 property in the proxy: the final chunk is withheld until the client's end-to-end
-checksum has been verified (`CONCEPT.md` §9.3), so a failed checksum can abort the
-upstream request before a complete body is ever written.
+checksum has been verified ([ADR-005](adr/ADR-005-checksums.md)), so a failed
+checksum can abort the upstream request before a complete body is ever written.
 
 ### 5.2 Decoder
 
@@ -520,9 +520,9 @@ remains an accepted risk.
 ### 10.7 Lifecycle
 
 Which manifests may be written and deleted, and in what order, is normative and is
-specified in `CONCEPT.md` §10.8 as rules R1–R4. The rules are model-checked in
-[`spec/tla/`](../spec/tla/) and recorded in
-[ADR-010](adr/ADR-010-manifest-lifecycle-under-concurrency.md). In short: every
+specified as rules R1–R4 in
+[ADR-010](adr/ADR-010-manifest-lifecycle-under-concurrency.md), and model-checked
+in [`spec/tla/`](../spec/tla/). In short: every
 operation that makes a multipart object visible mints a fresh manifest id and
 writes its own manifest before the object becomes visible, and deletes at most the
 manifest id it observed beforehand.
@@ -557,7 +557,7 @@ AAD   = "blindbucket/v1/upload-token" || lp(bucket) || lp(key)
 
 The DEK MUST NOT be derived from the `UploadId`: that value is chosen by the storage
 provider, and a provider that repeated one would force two uploads to share a key
-and reuse a (key, nonce) pair. See `CONCEPT.md` §10.3.
+and reuse a (key, nonce) pair. See [ADR-006](adr/ADR-006-upload-token.md).
 
 ---
 

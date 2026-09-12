@@ -79,7 +79,7 @@ func NewDecryptReader(src io.Reader, dek []byte, want SegmentParams) (*DecryptRe
 // commits to an answer it cannot retract. The proxy calls this before writing an
 // HTTP status: a wrong key, forged metadata or a tampered header then produces a
 // proper S3 error response instead of a connection abort halfway through a body.
-// See CONCEPT.md section 8.7.
+// See docs/adr/ADR-004-fail-closed.md.
 func (r *DecryptReader) VerifyFirst() error {
 	if r.err != nil {
 		return r.err

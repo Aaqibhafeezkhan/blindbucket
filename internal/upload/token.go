@@ -8,7 +8,7 @@
 // every instance can derive. Any instance can serve any part, instances can
 // restart mid-upload, and no load balancer needs sticky sessions.
 //
-// See CONCEPT.md section 10.3 and docs/adr/ADR-006-upload-token.md.
+// See docs/adr/ADR-006-upload-token.md.
 package upload
 
 import (

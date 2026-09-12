@@ -8,7 +8,7 @@ import (
 
 // defaultStallTimeout is how long a transfer may make no progress at all.
 //
-// CONCEPT.md 12.3 asks for deadlines renewed per chunk rather than one global
+// Deadlines are renewed as bytes move rather than set once as a global
 // WriteTimeout, and the distinction is the point: a 5 TiB download is a
 // legitimate request that may run for hours, while a connection that has moved
 // no bytes for a minute is not slow, it is stuck. A fixed WriteTimeout cannot

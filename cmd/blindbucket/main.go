@@ -1,9 +1,10 @@
 // Command blindbucket is the CLI for the blindbucket S3 encryption gateway.
 //
-// Subcommands arrive milestone by milestone; see CONCEPT.md and docs/ for the
-// plan. What exists today is the local crypto MVP: generate a keyring, and
-// encrypt or decrypt a stream with it, exercising exactly the code the proxy
-// will use for object bodies.
+// It runs the gateway (serve), manages keyrings (keygen, rotate), removes
+// orphaned multipart manifests (gc), and encrypts or decrypts a stream against
+// a keyring with no provider in the way (encrypt, decrypt) -- exercising
+// exactly the code the proxy uses for object bodies. The wire format and the
+// decisions behind it are in docs/.
 package main
 
 import (
@@ -102,7 +103,7 @@ func usage(w *os.File) {
 	for _, c := range commands() {
 		_, _ = fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
 	}
-	_, _ = fmt.Fprintf(w, "\nPlanned (see CONCEPT.md):\n")
+	_, _ = fmt.Fprintf(w, "\nPlanned:\n")
 	_, _ = fmt.Fprintf(w, "  %-9s %s\n", "inspect", "show an object's format details without decrypting (M6)")
 	_, _ = fmt.Fprintf(w, "\nRun `blindbucket <command> -h` for a command's flags.\n")
 }

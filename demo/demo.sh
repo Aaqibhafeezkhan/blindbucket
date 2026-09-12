@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# The recorded session: the thirty-second case for the project, as CONCEPT.md
-# section 20 describes it. A standard client uploads a large file through the
+# The recorded session: the thirty-second case for the project. A standard
+# client uploads a large file through the
 # gateway; the provider is then shown holding ciphertext and a wrapped key; the
 # download comes back with an identical hash; and a provider that changes one bit
 # gets an error instead of plaintext.

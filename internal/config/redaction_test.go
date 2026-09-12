@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// CONCEPT.md 17.2 says configuration secrets are never logged. Nothing logs a
+// Configuration secrets are never logged. Nothing logs a
 // Config today, so this is the guard that keeps it that way: the redaction is on
 // the type, not on the call sites.
 func TestConfigSecretsAreRedacted(t *testing.T) {

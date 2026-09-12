@@ -11,9 +11,9 @@
 the first entry. For most of the list there is a reason it cannot be helped —
 sizes follow from a length-deterministic format, timestamps and access patterns
 from the provider doing its job. Names are different: they are the one item on
-that list that is hidden by construction elsewhere, and CONCEPT.md §M6 has
-carried "deterministic name encryption, per path segment, so prefix listing
-keeps working" since the beginning.
+that list that is hidden by construction elsewhere, and the M6 stretch goals
+have carried "deterministic name encryption, per path segment, so prefix
+listing keeps working" since the beginning.
 
 It is also the largest remaining piece of work in the project, and the one with
 the most ways to be quietly wrong. This ADR is written before any code, because
@@ -74,7 +74,7 @@ So: build the construction from the standard library, as
 HMAC and compares, which makes it authenticated as well as deterministic.
 
 **This is consistent with the project's rule rather than an exception to it.**
-CONCEPT.md §21 says "an established construction, no own primitives", and the
+The project's rule is "an established construction, no own primitives", and the
 segment format already is exactly that: STREAM, a published construction,
 composed from stdlib AES-GCM. SIV is likewise published, and HMAC-SHA256 in
 place of AES-CMAC as its PRF is a documented variant. What is being written is

@@ -95,7 +95,7 @@ requests over-read up to 1 MiB. It remains available via `log2C = 20`.
   (`THREAT_MODEL.md`).
 - The encoder must hold back the last completed chunk until close, because it cannot know
   in advance whether more plaintext follows. This lookahead is a real complication — but it
-  is also what makes the checksum-before-commit behaviour of `CONCEPT.md` §9.3 possible.
+  is also what makes the checksum-before-commit behaviour possible.
 - A decoder must validate the header *before* allocating buffers sized from it, since the
   header is only authenticated once the first chunk verifies. This ordering requirement is
   easy to get wrong and is called out explicitly in `FORMAT.md` §5.2.

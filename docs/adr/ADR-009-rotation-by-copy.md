@@ -27,7 +27,7 @@ that must not move ciphertext means a server-side copy.
 
 **Clients keep writing.** Rotation reads an object and writes it back some time
 later. If a client replaces the object in between, writing back the pre-rotation
-version destroys that write. This is invariant **I2** from CONCEPT.md §11.2, and
+version destroys that write. This is invariant **I2**, and
 the model in [`spec/tla/`](../../spec/tla/) produces a six-state counterexample
 for the version without a guard: rotation reads, a client puts, rotation
 completes, the client's data is gone.
@@ -89,7 +89,7 @@ every rotated multipart object, with no error anywhere. It is also capped at
 **Write unconditionally and accept the race.** The window is short and rotation is
 rare, so the argument goes. The model needs six states to lose a client's write,
 and "short window, rare operation" is exactly the reasoning that produced the two
-race conditions in concept version 0.1. The conditional write costs one header.
+race conditions in design version 0.1. The conditional write costs one header.
 
 **Lock the prefix during rotation.** Correct, and it makes rotation an outage:
 writes to a prefix fail while it runs. It also needs a lock store, which the
@@ -122,5 +122,5 @@ model checks, or write a new one anyway.
   [ADR-012](ADR-012-copy-semantics.md) added on the same machinery — rotation is
   a copy whose destination is its source.
 - MinIO enforces both `x-amz-copy-source-if-match` and `If-Match` on completion.
-  That was an open question in §11.2 and is now a measured entry in
+  That was an open question at design time and is now a measured entry in
   `COMPATIBILITY.md` rather than an assumption.

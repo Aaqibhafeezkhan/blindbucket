@@ -59,7 +59,7 @@ var ErrVerify = errors.New("manifest: verification failed")
 // ID identifies one manifest, and through it one version of one object.
 //
 // A fresh id is minted by every operation that makes a multipart object visible
-// (rule R1 in CONCEPT.md section 10.8). Manifests are never shared between
+// (rule R1 in ADR-010). Manifests are never shared between
 // object versions, which is what lets a request delete exactly the manifest it
 // replaced without racing anything else. The rule is model-checked; see
 // spec/tla/Multipart.tla.

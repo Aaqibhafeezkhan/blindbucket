@@ -45,6 +45,6 @@ type KeyProvider interface {
 	// It is separate from Wrap because a token is not a data key: it is opened
 	// by an instance that may never have seen the upload being created, and it
 	// is keyed off the KEK so that it can be opened without knowing which object
-	// it belongs to. See CONCEPT.md section 10.3.
+	// it belongs to. See docs/adr/ADR-006-upload-token.md.
 	TokenKey(ctx context.Context, kid string) ([]byte, error)
 }

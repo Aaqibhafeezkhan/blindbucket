@@ -4,7 +4,7 @@
 // wraps it changes, so the ciphertext never leaves the provider and a terabyte
 // rotates as cheaply as a megabyte. That is also the honest limit of what
 // rotation buys: it protects against a compromised or expiring KEK, not against
-// a compromised DEK. See CONCEPT.md section 11.2.
+// a compromised DEK. See docs/adr/ADR-009-rotation-by-copy.md.
 //
 // The hard part is not the re-wrapping, it is doing it while clients are
 // writing. Rotation reads an object and writes it back some time later, and in

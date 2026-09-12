@@ -1,7 +1,7 @@
 --------------------------- MODULE Multipart ---------------------------
 (***************************************************************************)
 (* A model of blindbucket's manifest coordination, as described in         *)
-(* CONCEPT.md sections 10.6, 10.8 and 11.2.                                *)
+(* ADR-010 (manifest lifecycle) and ADR-009 (rotation).                    *)
 (*                                                                         *)
 (* The model covers coordination only, never cryptography.  Data keys,     *)
 (* segments, chunk authentication and part contents are all absent: what   *)

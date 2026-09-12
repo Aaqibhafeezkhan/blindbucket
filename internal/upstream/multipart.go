@@ -95,7 +95,7 @@ type UploadPartInput struct {
 // Like PutObject it is never retried here: the body is the client's stream and
 // cannot be replayed. A client that sees a failed part re-sends it, and because
 // every part attempt is its own segment with a fresh salt, a retry is safe even
-// when the failed attempt reached the provider (CONCEPT.md section 10.4).
+// when the failed attempt reached the provider (docs/FORMAT.md section 4.1).
 func (c *Client) UploadPart(ctx context.Context, in UploadPartInput) (string, error) {
 	if in.ContentLength < 0 {
 		return "", errors.New("upstream: UploadPart needs a known content length")
@@ -161,7 +161,7 @@ type CompleteMultipartUploadInput struct {
 	Parts    []CompletedPart
 	// IfMatch makes the completion conditional on the current object's ETag.
 	// Rotation uses it so that a client write landing mid-rotation wins instead
-	// of being silently replaced; see CONCEPT.md section 11.2 and the I2
+	// of being silently replaced; see ADR-009 and the I2
 	// counterexample in spec/tla/README.md.
 	IfMatch string
 }
@@ -329,7 +329,7 @@ type listUploadsResult struct {
 
 // ListMultipartUploads returns the uploads open under a prefix.
 //
-// This is step 2 of the gc order in CONCEPT.md section 10.8: an upload in flight
+// This is step 2 of the gc order in ADR-010: an upload in flight
 // may be about to publish a manifest that the listing already picked up, so gc
 // skips such a key entirely. The step order is load-bearing and model-checked;
 // see spec/tla/README.md.

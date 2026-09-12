@@ -14,7 +14,7 @@ import (
 )
 
 // A single-part PUT over a multipart object leaves the old manifest behind on
-// purpose -- it saves a HEAD on the most common write path (CONCEPT.md 10.8) --
+// purpose -- it saves a HEAD on the most common write path (ADR-010) --
 // and gc is what eventually removes it.
 func TestIntegrationGcCollectsOrphanFromOverwrite(t *testing.T) {
 	h := newHarness(t)

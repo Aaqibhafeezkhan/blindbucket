@@ -10,7 +10,7 @@
 [ADR-002](ADR-002-key-hierarchy.md) put the root key outside the process, and
 `FORMAT.md` §3 has named its three sources from the start: "AWS KMS | Vault
 Transit | Argon2id(passphrase)". Only the third existed. The other two were the
-last item on CONCEPT.md §19's cut list still outstanding, and the `KeyProvider`
+last deferred item still outstanding, and the `KeyProvider`
 interface had exactly one implementation — which is how an abstraction ends up
 being decoration rather than a seam.
 

@@ -70,7 +70,7 @@ func TestPprofIsOffByDefault(t *testing.T) {
 	}
 }
 
-// The metrics CONCEPT.md section 17.1 names must actually appear, with their
+// The metrics the package documents must actually appear, with their
 // label sets, or an alert written against them silently never fires.
 func TestMetricsAreExported(t *testing.T) {
 	registry := prometheus.NewRegistry()

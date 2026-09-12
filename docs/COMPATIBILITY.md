@@ -158,8 +158,8 @@ These apply to every client.
 
 ### Conditional writes, for rotation
 
-`blindbucket rotate` needs the provider to honour two preconditions, and
-CONCEPT.md §11.2 left it open whether MinIO does. Measured:
+`blindbucket rotate` needs the provider to honour two preconditions, and whether
+MinIO does was left open at design time. Measured:
 
 | Precondition | MinIO | Used for |
 |---|---|---|

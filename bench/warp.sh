@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Macro benchmark: MinIO `warp` against the storage provider directly, and the
-# same load through the gateway. See CONCEPT.md section 12.5.
+# same load through the gateway. See bench/README.md.
 #
 # The number that matters is not the absolute throughput -- that is whatever the
 # hardware and the provider can do -- but the *ratio* between the two paths, and

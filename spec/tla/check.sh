@@ -3,7 +3,7 @@
 # reports what it is supposed to report.
 #
 # Four of the five configurations are expected to FAIL: a model that cannot
-# reproduce the two races from CONCEPT.md 10.8 is too coarse to be evidence
+# reproduce the two races ADR-010 records is too coarse to be evidence
 # for anything, so "TLC found no counterexample" is a failure there.
 #
 # Usage:  ./check.sh [config-name ...]     (default: all of them)

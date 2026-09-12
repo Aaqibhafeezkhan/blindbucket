@@ -129,7 +129,7 @@ Flags:
 		// regardless of progress. What replaces it is per-transfer rather than
 		// per-server -- the proxy renews the connection's deadlines as bytes
 		// move, so a request may run as long as it likes but not stall as long
-		// as it likes (CONCEPT.md 12.3, internal/proxy/deadline.go).
+		// as it likes (internal/proxy/deadline.go).
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
@@ -232,7 +232,7 @@ func probeBucket(cfg *config.Config) string {
 // readiness reports whether the gateway can actually serve.
 //
 // Liveness is "the process runs"; readiness is "the keyring is loaded and the
-// provider answers", which is the pair CONCEPT.md section 17.3 asks for. The
+// provider answers" -- the pair an orchestrator needs to route traffic. The
 // provider check is a bucket HEAD rather than a listing: it is the cheapest call
 // that still proves credentials and connectivity, and it reads nothing.
 func readiness(client *upstream.Client, ring *keys.Keyring, bucket string) func(context.Context) error {

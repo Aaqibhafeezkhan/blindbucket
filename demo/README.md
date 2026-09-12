@@ -1,6 +1,6 @@
 # Demo recording
 
-The terminal recording [`CONCEPT.md`](../CONCEPT.md) section 20 asks for, and the
+The terminal recording the README leads with, and the
 scripts that produce it. It is the thirty-second version of the whole argument:
 
 1. A standard client — plain AWS CLI, only `--endpoint-url` changed — uploads a

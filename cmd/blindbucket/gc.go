@@ -26,7 +26,7 @@ visible one: a single-part upload replaced a multipart object, an upload crashed
 before completing, or the object was deleted in a batch. Orphans hold no
 plaintext; they only cost storage.
 
-The pass follows a fixed order (CONCEPT.md 10.8, rule R4): list the manifests,
+The pass follows a fixed order (ADR-010, rule R4): list the manifests,
 then ask for open uploads and skip any key that has one, then read the manifest
 id the visible object uses, and only then delete the rest. That order is
 model-checked in spec/tla/, and swapping the first two steps -- both of which
