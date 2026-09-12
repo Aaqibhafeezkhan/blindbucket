@@ -1,0 +1,164 @@
+# blindbucket as a sidecar: one instance per application, listening on localhost.
+#
+# This is the deployment shape CONCEPT.md section 14 calls the sidecar model, and
+# it is the one that makes the plaintext hop safe without TLS: the application
+# talks to 127.0.0.1 inside its own pod, so the plaintext never crosses a network
+# interface. Any other shape needs TLS between client and gateway, or it gives up
+# the property the gateway exists for.
+#
+# What the application changes: one environment variable.
+#
+#   AWS_ENDPOINT_URL=http://127.0.0.1:9000
+#
+# Everything below the S3 API stays as it was.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: blindbucket-keys
+type: Opaque
+stringData:
+  # The passphrase that unlocks the keyring. In a real cluster this comes from a
+  # secret manager -- External Secrets, Vault Agent, the cloud provider's CSI
+  # driver -- rather than from a manifest in version control.
+  passphrase: "replace-me"
+  # The keyring file itself. It holds KEKs wrapped under the passphrase, so it is
+  # useless without it -- but it is still key material, and it belongs in a
+  # Secret rather than a ConfigMap.
+  keyring.json: |
+    {"replace":"with the output of: blindbucket keygen --out keyring.json --kid 2026-09"}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blindbucket-config
+data:
+  blindbucket.yaml: |
+    server:
+      # Loopback only. In a pod this is the pod's own network namespace, so only
+      # containers in this pod can reach it.
+      listen: "127.0.0.1:9000"
+      # The application and the gateway share a network namespace, so the body
+      # between them never leaves the pod. That is the one deployment where
+      # accepting UNSIGNED-PAYLOAD is a reasonable trade rather than a hole.
+      allow_unsigned_payload: true
+
+    admin:
+      listen: "127.0.0.1:9100"
+      pprof: false
+
+    upstream:
+      endpoint: https://s3.eu-central-1.amazonaws.com
+      region: eu-central-1
+      access_key_id: ${UPSTREAM_ACCESS_KEY_ID}
+      secret_access_key: ${UPSTREAM_SECRET_ACCESS_KEY}
+
+    clients:
+      - name: app
+        access_key_id: ${CLIENT_ACCESS_KEY_ID}
+        secret_access_key: ${CLIENT_SECRET_ACCESS_KEY}
+        buckets: ["my-bucket"]
+
+    keys:
+      provider: file
+      keyring: /etc/blindbucket/keys/keyring.json
+
+    crypto:
+      log2_chunk_size: 16
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: my-app }
+  template:
+    metadata:
+      labels: { app: my-app }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+
+      containers:
+        - name: app
+          image: my-app:latest
+          env:
+            # The only change the application needs.
+            - name: AWS_ENDPOINT_URL
+              value: "http://127.0.0.1:9000"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: app-s3-credentials, key: access_key_id } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: app-s3-credentials, key: secret_access_key } }
+
+        - name: blindbucket
+          image: ghcr.io/lennardgeissler/blindbucket:v0.1.0
+          args: ["serve", "--config", "/etc/blindbucket/blindbucket.yaml"]
+
+          env:
+            - name: BLINDBUCKET_PASSPHRASE
+              valueFrom: { secretKeyRef: { name: blindbucket-keys, key: passphrase } }
+            # Upstream credentials. The application never sees these, which is
+            # what stops it reaching the provider directly and writing plaintext.
+            - name: UPSTREAM_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: blindbucket-upstream, key: access_key_id } }
+            - name: UPSTREAM_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: blindbucket-upstream, key: secret_access_key } }
+            - name: CLIENT_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: app-s3-credentials, key: access_key_id } }
+            - name: CLIENT_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: app-s3-credentials, key: secret_access_key } }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+
+          # Liveness is "the process runs" and deliberately does not touch the
+          # provider: an upstream outage restarting every gateway would turn a
+          # degradation into an outage. Readiness does check it, so a pod that
+          # cannot reach the provider stops taking traffic without restarting.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9100 }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: 9100 }
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            # Memory is a function of streams in flight, not of object size: a
+            # 5 TiB upload costs the same as a 5 MiB one. 256Mi is room for a few
+            # dozen concurrent streams; watch blindbucket_active_streams rather
+            # than guessing from object sizes.
+            limits: { cpu: "2", memory: 256Mi }
+
+          volumeMounts:
+            - { name: config, mountPath: /etc/blindbucket, readOnly: true }
+            - { name: keys, mountPath: /etc/blindbucket/keys, readOnly: true }
+
+      # Graceful shutdown is the process's own: on SIGTERM it stops accepting
+      # connections and lets in-flight requests finish, up to its 30-second
+      # grace. The 45 here leaves room for that plus the endpoint being removed
+      # from the service. There is deliberately no preStop hook -- the usual
+      # "sleep a few seconds" needs a shell, which this image does not have, and
+      # an exec hook that returns immediately would only look like one.
+      #
+      # An upload cut off by a restart leaves nothing behind at the provider: a
+      # segment only becomes valid when its final chunk is written.
+      terminationGracePeriodSeconds: 45
+
+      volumes:
+        - name: config
+          configMap: { name: blindbucket-config }
+        - name: keys
+          secret:
+            secretName: blindbucket-keys
+            items: [{ key: keyring.json, path: keyring.json }]
+            defaultMode: 0400

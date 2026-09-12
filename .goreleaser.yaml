@@ -1,0 +1,90 @@
+# Release build: binaries, checksums, an SBOM and a distroless image.
+# See CONCEPT.md section 16 ("goreleaser: Binaries, Container-Image, Checksummen, SBOM").
+version: 2
+
+project_name: blindbucket
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: blindbucket
+    main: ./cmd/blindbucket
+    binary: blindbucket
+    # No cgo: the crypto is Go's own, so the binary is static and the image can
+    # be distroless/static. ADR-011 records why that matters.
+    env:
+      - CGO_ENABLED=0
+    flags:
+      # -trimpath keeps absolute build paths out of the binary, which is both a
+      # small information leak and the main obstacle to a reproducible build.
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: blindbucket
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - docs/FORMAT.md
+      - docs/THREAT_MODEL.md
+      - blindbucket.example.yaml
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+# One entry builds both architectures and the manifest that ties them together.
+# The image is distroless/static:nonroot with the binary goreleaser already
+# produced copied in, so the released binary and the one in the image are the
+# same bytes.
+dockers_v2:
+  - images:
+      - "ghcr.io/lennardgeissler/blindbucket"
+    tags:
+      - "{{ .Version }}"
+      # Only a real release moves `latest`; a prerelease must not.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: deploy/Dockerfile.release
+    sbom: true
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Transparent S3 encryption gateway"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.source: "https://github.com/LennardGeissler/blindbucket"
+      org.opencontainers.image.licenses: "Apache-2.0"
+
+release:
+  draft: true
+  prerelease: auto
+  footer: |
+    ## Verifying a download
+
+    ```sh
+    sha256sum -c checksums.txt --ignore-missing
+    ```
+
+    The container image is `distroless/static:nonroot`: no shell, no package
+    manager, and it runs as uid 65532. Mount the keyring read-only and give the
+    container a read-only root filesystem.
+
+changelog:
+  disable: true

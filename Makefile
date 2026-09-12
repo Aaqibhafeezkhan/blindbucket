@@ -91,6 +91,19 @@ COUNT ?= 100000
 ref-diff:
 	cd ref/python && python3 difftest.py --count $(COUNT)
 
+# --- Release --------------------------------------------------------------
+
+# Validate the release configuration and build everything locally without
+# publishing. Run this before tagging: a tag triggers the real thing.
+.PHONY: release-check
+release-check:
+	goreleaser check
+	goreleaser release --snapshot --clean --skip=publish
+
+.PHONY: image
+image:
+	docker build -f deploy/Dockerfile -t blindbucket:dev --build-arg VERSION=dev .
+
 .PHONY: vuln
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest $(PKG)

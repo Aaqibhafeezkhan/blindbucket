@@ -1,0 +1,12 @@
+# The image goreleaser builds. It copies the binary goreleaser already produced
+# rather than compiling again, so the released binary and the one in the image
+# are the same bytes.
+#
+# deploy/Dockerfile is the from-source equivalent, for building without
+# goreleaser.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY blindbucket /blindbucket
+USER 65532:65532
+EXPOSE 9000 9100
+ENTRYPOINT ["/blindbucket"]
+CMD ["serve", "--config", "/etc/blindbucket/blindbucket.yaml"]

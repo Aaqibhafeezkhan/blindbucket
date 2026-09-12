@@ -6,11 +6,12 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 [![CI](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml/badge.svg)](https://github.com/LennardGeissler/blindbucket/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: M3 done — standard S3 clients work, below the multipart threshold.**
-> AWS CLI, boto3, `mc` and rclone all round-trip through the gateway. Client
-> requests are authenticated with SigV4; ranges, listings and checksums work.
-> Multipart uploads arrive with M4, so `aws s3 cp` of a file over 8 MiB still
-> fails — cleanly. See [Roadmap](#roadmap) and
+> **Status: `v0.1.0` — usable.** Standard S3 clients round-trip through the
+> gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
+> 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
+> Key rotation, metrics and health endpoints are in. Not in: the AWS KMS and
+> Vault key providers, and `CopyObject`. See [Roadmap](#roadmap),
+> [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ---
@@ -66,6 +67,23 @@ detectable.
 
 These are stated up front on purpose. The full analysis, including every residual risk, is
 in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
+
+## Install
+
+```sh
+# Container: distroless, nonroot, no shell, 21 MB.
+docker pull ghcr.io/lennardgeissler/blindbucket:v0.1.0
+
+# Or a binary, with checksums and an SBOM alongside it:
+#   https://github.com/LennardGeissler/blindbucket/releases
+
+# Or from source:
+go install github.com/LennardGeissler/blindbucket/cmd/blindbucket@latest
+```
+
+[deploy/kubernetes-sidecar.yaml](deploy/kubernetes-sidecar.yaml) is the sidecar
+deployment worked out: one gateway per pod, listening on loopback, so the
+plaintext hop never crosses a network interface.
 
 ## Try it today
 
@@ -294,6 +312,7 @@ memory is a function of streams in flight and not of object size.
 | [ref/python/](ref/python/) | A second decoder written from the format spec alone, and the differential test that compares it against the Go one. |
 | [bench/](bench/) | Benchmark scripts, the figures they produce, and the methodology notes that came out of getting them wrong first. |
 | [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
+| [CHANGELOG.md](CHANGELOG.md) | What each release contains, and what it does not. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
 ## Roadmap
@@ -307,15 +326,21 @@ memory is a function of streams in flight and not of object size.
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
 | — | Independent Python reference decoder, differential fuzzing | **done** |
-| M5 | Production: KMS/Vault providers, `CopyObject`, release | planned |
-| — | Metrics, health endpoints and pprof on a separate admin listener | **done** |
-| — | `blindbucket rotate`: KEK rotation with conditional writes | **done** |
-| — | Benchmarks: micro, memory, `warp` macro comparison, figures | **done** |
+| M5 | `blindbucket rotate`, metrics and health, benchmarks, release | **done** |
+| — | Deferred from M5: AWS KMS and Vault key providers, `CopyObject` | open |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3
 clients" actually means for anything over 8 MiB. M3.5 existed to get its coordination rules
 right before the code did — see below.
+
+**What `v0.1.0` does not have.** The key providers are the file-backed keyring only; the
+`KeyProvider` interface is what the AWS KMS and Vault implementations will slot into, and
+neither exists yet. `CopyObject` is refused — the copy machinery is in the upstream client,
+because rotation needs it, but the S3 operation is not wired up. `ListMultipartUploads` is
+refused permanently and says why. And one benchmark cell is documented as the provider's
+behaviour rather than explained; the gateway's share of it is measured at 0.13 ms per
+request.
 
 ## A race in my own design, and the machine that found it
 
@@ -325,8 +350,8 @@ still there and still decryptable, but the proxy refuses to serve an object it c
 as whole, so every `GetObject` fails. Neither bug lives in a single request — both need two
 requests interleaved a particular way, on two instances that never learn of each other.
 
-The fix was four rules, derived by reasoning. So was the bug. Before M4 turns those rules
-into Go, [`spec/tla/Multipart.tla`](spec/tla/Multipart.tla) turns them into a model that TLC
+The fix was four rules, derived by reasoning. So was the bug. Before M4 turned those rules
+into Go, [`spec/tla/Multipart.tla`](spec/tla/Multipart.tla) turned them into a model that TLC
 checks exhaustively: three concurrent uploads, a single-part PUT, a delete, a rotation and a
 `gc` pass on one key, with a crash possible after every step. 38.5 million distinct states,
 no counterexample.
@@ -356,8 +381,8 @@ passes review precisely because neither changes anything. TLC produces an unread
 twelve states: check for open uploads first, find none, then list, and the listing picks up a
 manifest written after the check. Listing first is what gives the check its meaning.
 
-That configuration is now a regression test. Each counterexample is also written out as a
-scenario for M4's integration tests — [spec/tla/README.md](spec/tla/README.md) has all four,
+That configuration is now a regression test. Each of the four counterexamples is also an
+integration test that replays it against a real provider — [spec/tla/README.md](spec/tla/README.md) links each one,
 and [ADR-010](docs/adr/ADR-010-manifest-lifecycle-under-concurrency.md) records what the model
 does and does not cover.
 
