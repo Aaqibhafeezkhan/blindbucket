@@ -39,7 +39,7 @@ project.
 | Constant memory | `O(chunk size)` per active stream, independent of object size |
 | Statelessness | No local state; multipart state travels in an encrypted token |
 | Drop-in compatibility | Standard clients unchanged, only `--endpoint-url` |
-| Key rotation | KEK rotation via server-side copy, no data transfer |
+| Key rotation — *not yet implemented, M5* | KEK rotation via server-side copy, no data transfer |
 
 ## Why not just use…
 
