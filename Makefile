@@ -76,6 +76,21 @@ tla-translate: $(TLA_TOOLS)
 tla: $(TLA_TOOLS)
 	TLA_TOOLS=$(abspath $(TLA_TOOLS)) ./spec/tla/check.sh
 
+# --- Independent reference decoder (ref/python) ------------------------------
+
+# Needs `pip install cryptography`.
+.PHONY: ref-vectors
+ref-vectors:
+	cd ref/python && python3 test_vectors.py
+
+# Differential test against the Go decoder. COUNT is the number of inputs;
+# CONCEPT.md asks for at least 100000, which takes a few minutes.
+COUNT ?= 100000
+
+.PHONY: ref-diff
+ref-diff:
+	cd ref/python && python3 difftest.py --count $(COUNT)
+
 .PHONY: vuln
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest $(PKG)

@@ -29,6 +29,10 @@ keyring.json
 *.key
 *.crt
 
+# Python bytecode from the reference decoder and the client tests
+__pycache__/
+*.py[cod]
+
 # Editors and OS
 .DS_Store
 .idea/

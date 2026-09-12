@@ -12,6 +12,35 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  # The reference decoder in ref/python was written from docs/FORMAT.md alone.
+  # Its value is entirely in being compared: a disagreement means the
+  # specification is ambiguous or one of the two is wrong, and either is worth
+  # knowing. 100 000 inputs is the number CONCEPT.md asks for and takes a few
+  # minutes; the nightly budget allows more.
+  differential:
+    name: Differential decoder (Go vs Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet cryptography
+
+      # The vectors are normative, so the reference decoder has to pass them
+      # before its verdicts are worth comparing against anything.
+      - name: Known-answer vectors
+        working-directory: ref/python
+        run: python3 test_vectors.py
+
+      - name: Differential fuzzing
+        working-directory: ref/python
+        run: python3 difftest.py --count 250000 --seeds 400 --seed ${{ github.run_number }}
+
   fuzz:
     name: Long fuzz
     runs-on: ubuntu-latest

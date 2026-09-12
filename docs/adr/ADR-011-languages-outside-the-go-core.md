@@ -40,7 +40,7 @@ of these holds:
 |---|---|---|---|---|
 | boto3 compatibility tests | Python | 1 | `test/integration/clients/boto3/` | M3 |
 | Model of manifest and rotation coordination | TLA+ (PlusCal), TLC | 3 | `spec/tla/` | M3.5 |
-| Independent reference decoder, differential fuzzing | Python (`cryptography`) | 2 | `ref/python/` | after M4, optional |
+| Independent reference decoder, differential fuzzing | Python (`cryptography`) | 2 | `ref/python/` | after M4 |
 | Benchmark plots and summaries | Python (standard library only) | 1 | `bench/plot/` | M5 |
 | Machine-readable format description | Kaitai Struct | 3 | `docs/format.ksy` | M6, optional |
 

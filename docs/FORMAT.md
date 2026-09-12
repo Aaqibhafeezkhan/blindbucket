@@ -1,7 +1,7 @@
 # blindbucket Wire Format — Version 1
 
 **Status:** Normative for format version `1`, and implemented as specified.
-**Last updated:** 2026-09-11 (M1)
+**Last updated:** 2026-09-12 (clarifications from the independent reference decoder)
 
 Sections 4 through 9 are implemented in `internal/crypto/stream`,
 `internal/crypto/keys` and `internal/crypto/envelope`, and are pinned by the
@@ -11,6 +11,12 @@ This document is the authoritative specification of the bytes blindbucket writes
 object storage. It is written so that an independent implementation can interoperate
 with blindbucket using only this document and the test vectors in
 [`testdata/vectors/`](../testdata/vectors/).
+
+That claim has been tested rather than asserted: [`ref/python/`](../ref/python/)
+holds a second decoder written from this document, and it agrees with the Go one
+on every vector and on 100 000 mutated inputs. The two clarifications in §4.4 and
+§5.2 are what writing it turned up — neither changes the format, both state
+something that was previously only derivable.
 
 The design rationale lives in [`CONCEPT.md`](../CONCEPT.md) §8 and in
 [ADR-001](adr/ADR-001-segment-format.md) / [ADR-002](adr/ADR-002-key-hierarchy.md).
@@ -149,6 +155,19 @@ Chunk_i  = AES-256-GCM-Seal(key = Subkey, nonce = Nonce_i,
 Consequently `N = max(1, ceil(P / C))` and a segment always contains at least one
 chunk.
 
+On the wire this fixes every length a decoder needs:
+
+| | Ciphertext bytes |
+|---|---|
+| A chunk that is not the last | exactly `C + 16` |
+| The last chunk of a non-empty segment | `17` to `C + 16` |
+| The single chunk of an empty segment | exactly `16` |
+| The smallest possible segment | `32 + 16 = 48` |
+
+A decoder therefore never has to guess where a chunk ends: it consumes `C + 16`
+bytes at a time until at most `C + 16` remain, and that remainder is the last
+chunk.
+
 ---
 
 ## 5. Encoder and decoder requirements
@@ -184,6 +203,16 @@ A decoder MUST, in this order:
 5. For each chunk, determine `f` by looking ahead exactly one byte past the chunk's
    ciphertext: if any byte follows, `f` MUST be `0`; if the stream ends, `f` MUST
    be `1`.
+
+A decoder that holds the whole segment in memory rather than streaming it applies
+rule 5 by length instead of by lookahead, and the boundary is easy to get wrong in
+a way that ordinary testing does not catch. Chunk `i` is the last one exactly when
+**at most** `C + 16` bytes of it and everything after it remain — `<=`, not `<`.
+Reading it as `<` produces a decoder that works on every input whose plaintext is
+*not* an exact multiple of `C`, and rejects every input whose plaintext is: with
+that reading the final full chunk is opened under `f = 0` and fails its tag. The
+`exactly one chunk` known-answer vector of §13 exists to catch this, and it is the
+only one of the ten that does.
 
 A decoder MUST NOT release the plaintext of a chunk to its caller before that chunk's
 authentication tag has been fully verified. A decoder MUST treat every deviation —

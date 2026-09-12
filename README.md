@@ -243,6 +243,7 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Which clients work, which settings they need, and what does not work yet. Measured, not assumed. |
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
+| [ref/python/](ref/python/) | A second decoder written from the format spec alone, and the differential test that compares it against the Go one. |
 | [spec/tla/](spec/tla/) | The formal model of the manifest coordination, its five TLC configurations, and the counterexamples written out. |
 | [CONCEPT.md](CONCEPT.md) | The full design document the project is being built from (German). |
 
@@ -256,7 +257,7 @@ constant-memory claim is measured on the Go heap rather than inferred from RSS.
 | M3 | S3 compatibility: SigV4 verification, checksums, ranges, listings | **done** |
 | M3.5 | TLA+ model of the manifest and rotation coordination, checked with TLC | **done** |
 | M4 | Multipart uploads: upload token, manifest, `gc`, multi-instance operation | **done** |
-| — | Independent Python reference decoder, differential fuzzing | optional |
+| — | Independent Python reference decoder, differential fuzzing | **done** |
 | M5 | Production: KMS/Vault providers, `CopyObject`, rotation, metrics | planned |
 | — | Benchmarks: micro, memory, `warp` macro comparison, figures | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
@@ -348,6 +349,13 @@ client tests, the TLA+ model — has a written reason in
 The format was specified before it was implemented precisely so that it can be reviewed,
 and [testdata/vectors/segment_v1.json](testdata/vectors/segment_v1.json) fixes every input
 so an independent implementation can check itself against it.
+
+That is no longer only an invitation: [ref/python/](ref/python/) is a second decoder
+written from the specification, and it agrees with the Go one on every vector and on
+100 000 mutated inputs. Writing it turned up one ambiguity — the final-chunk rule is
+stated for a streaming decoder, and the natural length comparison for a buffered one can
+be read two ways, of which the wrong one is correct for every object whose size is not an
+exact multiple of the chunk size. That is now spelled out in the format spec.
 
 Every guarantee is backed by tests that play an actively hostile storage provider and
 require an error rather than plaintext: every single-bit flip across all 32 header bytes,
