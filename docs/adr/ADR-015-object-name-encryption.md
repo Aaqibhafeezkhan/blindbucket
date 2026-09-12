@@ -138,13 +138,48 @@ misled by an omission.
 These are S3 behaviours that get worse, and they are the reason this is weeks of
 work rather than days.
 
-**Listing order.** S3 returns keys in lexicographic order of the stored key.
-Encrypted names sort differently from plaintext ones, so a listing comes back in
-an order that is arbitrary from the client's point of view. Order-preserving
-encryption is the only thing that would fix it, and it is a far weaker primitive
-— not a trade worth making. `aws s3 sync`, `start-after` and every client that
-assumes ordering are affected. This is the largest single casualty and it needs
-its own measurement pass against the four clients.
+**Listing order — measured, and worse than expected.** S3 returns keys in
+lexicographic order of the *stored* key. Encrypted names sort differently from
+plaintext ones, so the gateway returns correct names in an order that is
+arbitrary to the client.
+
+This was measured against the AWS CLI with a stub endpoint that serves the same
+eight keys sorted and unsorted, everything else held equal:
+
+| Destination listing | `aws s3 sync local s3://bucket --delete` |
+|---|---|
+| sorted | 0 deletes — correct, every local file exists remotely |
+| unsorted | **7 deletes of objects that do exist locally** |
+
+The CLI's comparator is a merge-join over two sorted streams. Fed an unsorted
+one it concludes that present objects are absent. In the upload direction with
+`--delete`, that is the gateway causing a client to delete data out of the
+encrypted bucket — no error, no warning, and the objects are gone.
+
+**This is not a documentation problem.** A footgun that silently destroys data
+is not something a tool whose argument is safety can ship behind a note in a
+compatibility matrix, and the gateway cannot refuse the dangerous case because
+`--delete` is client-side logic it never sees.
+
+So the feature needs an answer to listing order before it can ship, and every
+answer costs something:
+
+- **Buffer and sort per prefix.** The gateway lists the whole prefix upstream,
+  decrypts, sorts, and serves pages from that. Correct, and it holds memory
+  proportional to the number of keys under the prefix — roughly 100 MB for a
+  million-object prefix, against a design whose headline is `O(chunk size)`.
+- **Re-scan per page**, carrying the last plaintext key in the continuation
+  token. Bounded memory, but `O(n)` upstream work per page and `O(n²/1000)` for
+  a full walk. Fine at ten thousand objects, unusable at a million.
+- **A bound with a refusal.** Sort up to a configured key count and answer
+  anything larger with an error rather than a wrong order. Honest, and it makes
+  the limit visible instead of latent.
+- **Ship name encryption without ordered listings** and accept that sync with
+  `--delete` corrupts. Rejected on the grounds above.
+
+The choice among the first three is open and is the next decision this ADR
+needs. It is also the reason the effort estimate for this feature was wrong:
+the encryption was the easy half.
 
 **Partial-segment prefixes.** `prefix=photos/2026` is a prefix of the segment
 `2026-01`, not a whole segment, and a partial segment has no encrypted prefix to
