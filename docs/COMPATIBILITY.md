@@ -4,7 +4,7 @@ What actually works, measured by pointing each client at the gateway and running
 it. Every result below came from a real client against a real MinIO, not from
 reading a specification.
 
-**Measured:** 2026-09-11, against M4.
+**Measured:** 2026-09-12, against `v0.1.0`.
 **Setup:** `docker compose up -d`, `blindbucket serve`, path-style, 64 KiB chunks.
 
 ---
@@ -146,7 +146,7 @@ These apply to every client.
 | Limit | Detail | Arrives |
 |---|---|---|
 | **`ListMultipartUploads`** | Returns `NotImplemented`, and will keep doing so. The upload ids this gateway issues are sealed tokens carrying the data key and the manifest id (ADR-006); neither can be reconstructed from the provider's listing, so the call could only return ids no client is able to use. Clients that abort their own uploads are unaffected — they hold the token already. | — |
-| **`UploadPartCopy`** | Returns `NotImplemented`. It needs the range-preserving copy path that arrives with `CopyObject`. | M5 |
+| **`UploadPartCopy`** | Returns `NotImplemented`. The copy machinery is in the upstream client, because rotation needs it, but the S3 operation is not wired up. Deferred with `CopyObject`. | — |
 | **Part sizes** | Every part but the last must be a multiple of the chunk size (FORMAT §7.3). The defaults of every client above satisfy this; a client configured with, say, 5.5 MiB parts is refused at completion with a message naming the fix. | — |
 
 ### Conditional writes, for rotation

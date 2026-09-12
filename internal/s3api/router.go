@@ -71,9 +71,8 @@ func (o Operation) IsMultipart() bool {
 const MaxKeyLength = 1024
 
 // ReservedPrefix is where blindbucket keeps its own objects inside a user
-// bucket. Client access to it is refused: from M4 it holds the multipart
-// manifests, and a client that could delete one would make an object
-// unreadable.
+// bucket. Client access to it is refused: it holds the multipart manifests, and
+// a client that could delete one would make its own object unreadable.
 const ReservedPrefix = ".blindbucket/"
 
 // MaxPartNumber is S3's largest part number.
@@ -298,8 +297,9 @@ func routeMultipart(r *http.Request, bucket, key string, initiating bool, upload
 			return unsupported(req), apiErr
 		}
 		// UploadPartCopy: a part whose bytes come from another object rather
-		// than from the request body. It needs a range-preserving copy path and
-		// lands with CopyObject in M5.
+		// than from the request body. The copy machinery exists in
+		// internal/upstream, because rotation needs it, but the S3 operation is
+		// not wired up; it is deferred with CopyObject.
 		if r.Header.Get("X-Amz-Copy-Source") != "" {
 			return unsupported(req), ErrNotImplemented.WithMessage(
 				"UploadPartCopy is not implemented in this build")

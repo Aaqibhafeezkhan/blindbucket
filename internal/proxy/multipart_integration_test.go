@@ -170,7 +170,7 @@ func TestIntegrationMultipartRoundTrip(t *testing.T) {
 }
 
 // A single-part multipart upload is the shape `aws s3 cp` produces at the
-// threshold, and the shape rotation will reuse in M5.
+// threshold, and the shape rotation reuses for every object it rewrites.
 func TestIntegrationMultipartSinglePart(t *testing.T) {
 	h := newHarness(t)
 	key := testKey(t, "one-part.bin")

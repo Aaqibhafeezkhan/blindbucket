@@ -103,12 +103,6 @@ BLINDBUCKET_STREAM_SIZE=10GiB go test ./internal/crypto/stream \
   -run TestLargeStreamRoundTrip -v -timeout 30m
 ```
 
-## Still to come (M5)
-
-`warp` scenarios against MinIO with and without the proxy, latency percentiles at
-1, 16 and 64 concurrent clients, and the RSS-over-time plot for the README. See
-CONCEPT.md section 12.5.
-
 ## A caution the scripts now encode
 
 The first macro run reported the gateway at 72 MiB/s against the provider's 214

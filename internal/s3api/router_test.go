@@ -384,10 +384,9 @@ func TestRouteMultipartRefusesMalformedRequests(t *testing.T) {
 	}
 }
 
-// UploadPartCopy is a part whose bytes come from another object. It needs the
-// range-preserving copy path that lands with CopyObject in M5, and until then it
-// must be refused rather than treated as an ordinary part upload with an empty
-// body.
+// UploadPartCopy is a part whose bytes come from another object. It is deferred
+// along with CopyObject, and until then it must be refused rather than treated as
+// an ordinary part upload with an empty body.
 func TestRouteRefusesUploadPartCopy(t *testing.T) {
 	t.Parallel()
 

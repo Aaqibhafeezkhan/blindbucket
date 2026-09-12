@@ -29,7 +29,7 @@ upstream:
   secret_access_key: ${UPSTREAM_SECRET_ACCESS_KEY}
 
 keys:
-  provider: file                         # vault and awskms arrive with M5
+  provider: file                         # the only provider today; vault and awskms are deferred
   keyring: keyring.json
   # passphrase_file: /run/secrets/keyring-passphrase
   # Otherwise the passphrase comes from $BLINDBUCKET_PASSPHRASE.

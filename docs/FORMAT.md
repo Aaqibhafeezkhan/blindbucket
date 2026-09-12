@@ -1,11 +1,13 @@
 # blindbucket Wire Format — Version 1
 
 **Status:** Normative for format version `1`, and implemented as specified.
-**Last updated:** 2026-09-12 (clarifications from the independent reference decoder)
+**Last updated:** 2026-09-12 (clarifications from the independent reference decoder;
+the manifest and upload token of sections 10 and 11 became normative with M4)
 
-Sections 4 through 9 are implemented in `internal/crypto/stream`,
-`internal/crypto/keys` and `internal/crypto/envelope`, and are pinned by the
-known-answer vectors of section 12. Section 10 is still design-only.
+Every section is implemented. Sections 4 to 9 live in `internal/crypto/stream`,
+`internal/crypto/keys` and `internal/crypto/envelope` and are pinned by the
+known-answer vectors of section 13; section 10 is `internal/manifest` and
+section 11 is `internal/upload`.
 
 This document is the authoritative specification of the bytes blindbucket writes to
 object storage. It is written so that an independent implementation can interoperate

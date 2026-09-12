@@ -472,8 +472,9 @@ func (p *Proxy) abortResponse(log *slog.Logger, written, expected int64, err err
 // integrityError logs a failed authentication and renders it for the client.
 //
 // A rise in these is security-relevant: it means either a bug or a provider
-// modifying stored data. M5 turns this into the
-// blindbucket_integrity_failures_total metric.
+// modifying stored data, which is why it is also counted as
+// blindbucket_integrity_failures_total{kind} and is the one metric worth an
+// alert.
 func (p *Proxy) integrityError(log *slog.Logger, kind string, err error) *s3api.Error {
 	p.metrics.IntegrityFailure(metricKind(kind))
 	log.Error("integrity check failed", "kind", kind, "err", err)

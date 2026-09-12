@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"regexp"
@@ -18,7 +19,7 @@ import (
 type Config struct {
 	Server   Server   `yaml:"server"`
 	Upstream Upstream `yaml:"upstream"`
-	Clients  []Client `yaml:"clients"`
+	Clients  Clients  `yaml:"clients"`
 	Keys     Keys     `yaml:"keys"`
 	Crypto   Crypto   `yaml:"crypto"`
 	Admin    Admin    `yaml:"admin"`
@@ -91,7 +92,8 @@ type Upstream struct {
 // Keys configures where key-encryption keys come from.
 type Keys struct {
 	// Provider selects the root-key source. Only "file" exists in this build;
-	// "vault" and "awskms" arrive with M5.
+	// "vault" and "awskms" are deferred: the KeyProvider interface is what they
+	// slot into, and neither is implemented yet.
 	Provider string `yaml:"provider"`
 	Keyring  string `yaml:"keyring"`
 	// PassphraseFile holds the keyring passphrase. If empty, the passphrase is
@@ -104,6 +106,72 @@ type Crypto struct {
 	// Log2ChunkSize selects the chunk size for new objects. It is also the
 	// fallback when reading an object whose metadata does not record one.
 	Log2ChunkSize uint8 `yaml:"log2_chunk_size"`
+}
+
+// LogValue redacts the upstream credentials.
+//
+// Nothing logs a Config today. This exists so that nothing can start to: the
+// same argument as keys.DEK, which redacts itself rather than relying on every
+// call site to remember. Both this and String are needed -- LogValue covers
+// slog, String covers the %s and %v that a hurried debug line reaches for.
+func (u Upstream) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("endpoint", u.Endpoint),
+		slog.String("region", u.Region),
+		slog.Bool("path_style", u.PathStyle),
+		slog.String("access_key_id", u.AccessKeyID),
+		slog.String("secret_access_key", "[REDACTED]"),
+		slog.String("session_token", "[REDACTED]"),
+	)
+}
+
+// String redacts the secrets, so %s and %v cannot print them either.
+func (u Upstream) String() string {
+	return fmt.Sprintf("upstream{endpoint:%s region:%s access_key_id:%s secret:[REDACTED]}",
+		u.Endpoint, u.Region, u.AccessKeyID)
+}
+
+// Clients is a list of client credentials.
+//
+// It is a named type solely so that it can redact itself. slog resolves
+// LogValuer on the value it is handed, but not on the elements of a plain slice
+// inside it -- so `slog.Any("clients", []Client{...})` marshals the structs and
+// prints every secret, which is what a test of this caught after the per-element
+// redaction below was already in place.
+type Clients []Client
+
+// LogValue redacts every credential in the list.
+func (c Clients) LogValue() slog.Value {
+	out := make([]slog.Attr, 0, len(c))
+	for i, client := range c {
+		out = append(out, slog.Any(strconv.Itoa(i), client.LogValue()))
+	}
+	return slog.GroupValue(out...)
+}
+
+// String redacts every credential in the list.
+func (c Clients) String() string {
+	rendered := make([]string, 0, len(c))
+	for _, client := range c {
+		rendered = append(rendered, client.String())
+	}
+	return "[" + strings.Join(rendered, " ") + "]"
+}
+
+// LogValue redacts a client credential.
+func (c Client) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("name", c.Name),
+		slog.String("access_key_id", c.AccessKeyID),
+		slog.String("secret_access_key", "[REDACTED]"),
+		slog.Any("buckets", c.Buckets),
+	)
+}
+
+// String redacts a client credential.
+func (c Client) String() string {
+	return fmt.Sprintf("client{name:%s access_key_id:%s secret:[REDACTED] buckets:%v}",
+		c.Name, c.AccessKeyID, c.Buckets)
 }
 
 // envRef matches a ${VARIABLE} reference.

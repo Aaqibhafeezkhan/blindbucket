@@ -22,9 +22,10 @@ var ErrUnwrap = errors.New("keys: unwrapping failed")
 // KeyProvider is where key-encryption keys come from.
 //
 // Implementations wrap and unwrap data keys under a KEK identified by kid. The
-// file-backed Keyring does this locally against KEKs held in memory; the Vault
-// and AWS KMS providers planned for M5 decrypt the keyring at startup and then
-// behave identically, so that no request pays for a round trip to a key service.
+// file-backed Keyring does this locally against KEKs held in memory. The Vault
+// and AWS KMS providers are deferred; the design is that they decrypt the keyring
+// at startup and then behave identically, so that no request pays for a round
+// trip to a key service.
 type KeyProvider interface {
 	// ActiveKID returns the id of the KEK new data keys are wrapped under.
 	ActiveKID() string

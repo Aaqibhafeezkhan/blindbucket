@@ -1,13 +1,15 @@
 # Threat Model
 
-**Status:** Current as of M1. Revised at every milestone that adds an attack surface.
+**Status:** Current as of `v0.1.0`. Revised at every milestone that adds an
+attack surface.
 
-The guarantees below that concern the segment format itself -- chunk integrity,
-ordering, truncation detection, binding to bucket and key -- are implemented and
-covered by the attack tests listed in section 7. Everything involving HTTP, client
-authentication or multipart objects is still design-only and is marked as such in
-the roadmap, not here.
-**Last updated:** 2026-09-11
+Everything below is implemented and covered by the attack tests of section 7 --
+the segment format's own guarantees (chunk integrity, ordering, truncation
+detection, binding to bucket and key), the HTTP surface, client authentication,
+and the multipart path including the manifest and the upload token. Where a
+mitigation is deferred rather than present, the entry says so and names the
+milestone.
+**Last updated:** 2026-09-12
 
 This document states precisely what blindbucket protects against and what it does not.
 It is deliberately explicit about residual risk. A security tool that overstates its

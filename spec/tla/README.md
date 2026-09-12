@@ -8,7 +8,7 @@ different instances, and any of them may die at any point.
 It exists because those rules — R1 to R4 — were derived by *reasoning*. Version 0.1 of the
 concept contained two race conditions that were also derived by reasoning, and they survived
 being written down, read again, and reviewed. Argument is not evidence, so the rules are
-checked here before M4 turns them into Go.
+checked here before M4 turned them into Go.
 
 ## What is modelled, and what is not
 
