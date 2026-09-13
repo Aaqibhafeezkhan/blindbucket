@@ -12,7 +12,16 @@ const (
 	aadObjectPrefix = "blindbucket/v1/dek"
 	aadFilePrefix   = "blindbucket/v1/dek-file"
 	aadKEKPrefix    = "blindbucket/v1/kek"
+	aadAuditPrefix  = "blindbucket/v1/audit-secret"
 )
+
+// auditAAD is the associated data binding the audit secret to its purpose.
+//
+// It has no variable part. An audit secret is one per keyring, not one per key
+// id, so there is nothing to bind it to beyond the context itself -- and the
+// fixed prefix is what stops a wrapped audit secret being unwrapped as a KEK, or
+// the reverse.
+func auditAAD() []byte { return []byte(aadAuditPrefix) }
 
 // MaxKIDLen bounds a key identifier.
 //

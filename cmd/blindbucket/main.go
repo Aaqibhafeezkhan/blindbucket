@@ -1,10 +1,10 @@
 // Command blindbucket is the CLI for the blindbucket S3 encryption gateway.
 //
 // It runs the gateway (serve), manages keyrings (keygen, rotate), removes
-// orphaned multipart manifests (gc), and encrypts or decrypts a stream against
-// a keyring with no provider in the way (encrypt, decrypt) -- exercising
-// exactly the code the proxy uses for object bodies. The wire format and the
-// decisions behind it are in docs/.
+// orphaned multipart manifests (gc), verifies the audit log (audit), and
+// encrypts or decrypts a stream against a keyring with no provider in the way
+// (encrypt, decrypt) -- exercising exactly the code the proxy uses for object
+// bodies. The wire format and the decisions behind it are in docs/.
 package main
 
 import (
@@ -33,6 +33,7 @@ func commands() []command {
 		{"keygen", "create a keyring, or add a key to an existing one", runKeygen},
 		{"gc", "remove orphaned multipart manifests", runGC},
 		{"rotate", "re-wrap data keys under a new KEK", runRotate},
+		{"audit", "verify the audit log, or print the key that verifies it", runAudit},
 		{"encrypt", "encrypt a stream into a blindbucket file", runEncrypt},
 		{"decrypt", "decrypt a blindbucket file", runDecrypt},
 		{"version", "print the version and exit", runVersion},

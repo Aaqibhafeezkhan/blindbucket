@@ -161,6 +161,7 @@ func (p *Proxy) copyObject(
 		return translateUpstream(err)
 	}
 
+	p.noteObject(r, dest.KeyID, 0)
 	log.Info("object copied",
 		"source_bucket", src.Bucket, "source_key", src.Key,
 		"multipart", meta.Multipart, "kid", dest.KeyID)

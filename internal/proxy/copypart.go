@@ -166,6 +166,7 @@ func (p *Proxy) uploadPartCopy(
 	}
 
 	p.metrics.Bytes(obs.OutCipher, sealedLen)
+	p.noteObject(r, token.KID, plainLen)
 	log.Info("part copied", "part", req.PartNumber,
 		"source_bucket", src.Bucket, "source_key", src.Key,
 		"plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen)

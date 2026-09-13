@@ -8,8 +8,10 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/LennardGeissler/blindbucket/internal/audit"
 	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/keys"
 	"github.com/LennardGeissler/blindbucket/internal/crypto/stream"
@@ -49,6 +51,14 @@ type Config struct {
 	// StallTimeout is how long a transfer may make no progress before its
 	// connection is dropped. Zero selects defaultStallTimeout.
 	StallTimeout time.Duration
+	// Audit records what the gateway served, in a hash-chained and signed log
+	// (ADR-016). A nil value records nothing, which is the default: a gateway
+	// that wrote an audit log nobody asked for would produce something that
+	// looks like evidence without being any.
+	Audit *audit.Writer
+	// AuditFailClosed refuses requests once the audit log cannot be written,
+	// rather than serving on with a record known to be incomplete.
+	AuditFailClosed bool
 }
 
 // Proxy serves the S3 API, encrypting on the way in and decrypting on the way
@@ -62,6 +72,9 @@ type Proxy struct {
 	log        *slog.Logger
 	metrics    *obs.Metrics
 	stall      time.Duration
+
+	audit           *audit.Writer
+	auditFailClosed bool
 
 	// hook is called at the coordination points named in hooks.go. It exists so
 	// that the integration tests can replay the model's counterexamples, and is
@@ -99,6 +112,9 @@ func New(cfg Config) (*Proxy, error) {
 		log:        logger,
 		metrics:    cfg.Metrics,
 		stall:      cfg.StallTimeout,
+
+		audit:           cfg.Audit,
+		auditFailClosed: cfg.AuditFailClosed,
 	}, nil
 }
 
@@ -111,6 +127,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	w = recorder
+
+	// req and client are read by the deferred audit record below, which is why
+	// they are declared here rather than at the point they are first known.
+	var (
+		req    s3api.Request
+		client string
+	)
+	if p.audit != nil {
+		var facts *auditFacts
+		r, facts = withAuditFacts(r)
+		// Deferred, so that every exit records: an early routing failure, a
+		// rejected signature, a served request, and -- because the panic of
+		// ADR-004 unwinds through here -- a download aborted mid-body.
+		defer func() { p.recordRequest(req, requestID, client, recorder.status, facts, started) }()
+	}
+
+	// A broken audit log refuses the request before the provider is touched.
+	if apiErr := p.auditGate(); apiErr != nil {
+		p.fail(w, r, requestID, req, apiErr)
+		p.metrics.Request(string(req.Op), recorder.status, time.Since(started))
+		return
+	}
 
 	req, apiErr := s3api.Route(r, p.baseDomain)
 	if apiErr != nil {
@@ -133,11 +171,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Warn("rejecting a request that failed verification", "err", authErr)
 		translated := translateAuth(authErr)
 		p.metrics.AuthFailure(translated.Code)
+		p.notePrincipal(r, attemptedAccessKeyID(r))
 		p.fail(w, r, requestID, req, translated)
 		p.metrics.Request(string(req.Op), recorder.status, time.Since(started))
 		return
 	}
-	log = log.With("client", authResult.Client.Name)
+	client = authResult.Client.Name
+	log = log.With("client", client)
 
 	var err *s3api.Error
 	switch req.Op {
@@ -222,7 +262,49 @@ func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, requestID string, r
 	p.log.Log(r.Context(), level, "request failed",
 		"request_id", requestID, "op", string(req.Op), "bucket", req.Bucket, "key", req.Key,
 		"code", apiErr.Code, "status", apiErr.HTTPStatus, "detail", apiErr.Message)
+	p.noteCode(r, apiErr.Code)
 	s3api.WriteError(w, r, apiErr, requestID)
+}
+
+// attemptedAccessKeyID recovers the identity a rejected request claimed.
+//
+// It reads the credential field directly instead of going through
+// auth.ParseAuthorization, and that is deliberate rather than lazy. The verifier
+// is strict because it must be: a header whose signature is the wrong length is
+// not a request it will ever accept. But a *rejected* request is precisely the
+// one an audit log exists to record, and the headers attackers send are
+// malformed far more often than not. Requiring a well-formed header here would
+// leave the log silent about exactly the traffic worth seeing.
+//
+// The result is attacker-controlled and is bounded and stripped of control
+// characters by the audit writer before it is recorded.
+func attemptedAccessKeyID(r *http.Request) string {
+	if id := credentialOf(r.Header.Get("Authorization"), "Credential="); id != "" {
+		return id
+	}
+	// A presigned URL carries it in the query instead. This build refuses those
+	// (auth.ErrUnsupportedPayload), which does not make who tried less worth
+	// recording.
+	return credentialOf(r.URL.Query().Get("X-Amz-Credential"), "")
+}
+
+// credentialOf pulls the access key id out of a SigV4 credential scope.
+//
+// The scope is "<id>/<date>/<region>/<service>/aws4_request", so the id is
+// everything up to the first separator -- and a value with no separator at all
+// is taken whole, because a caller that sent only an id still named one.
+func credentialOf(value, prefix string) string {
+	if prefix != "" {
+		_, rest, found := strings.Cut(value, prefix)
+		if !found {
+			return ""
+		}
+		value = rest
+	}
+	if i := strings.IndexAny(value, "/, \t"); i >= 0 {
+		value = value[:i]
+	}
+	return value
 }
 
 // newRequestID returns an opaque id echoed to the client and carried in logs.

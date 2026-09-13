@@ -24,7 +24,8 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 > 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
 > Key rotation, server-side copy, metrics and health endpoints are in, and the
 > keyring can be unsealed by Vault Transit or AWS KMS instead of a passphrase.
-> See [Roadmap](#roadmap),
+> On `main` since, and **not** in `v0.2.0`: the
+> [audit log](#the-audit-log). See [Roadmap](#roadmap),
 > [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -121,7 +122,7 @@ network). Anyone who controls the proxy host or the KEK has everything.
 
 Metadata is **not** hidden: object names, exact sizes, timestamps and access patterns remain
 visible to the provider. Rollback to an older genuine version of an object is not currently
-detectable.
+detectable — and the [audit log](#the-audit-log), despite the name, does not change that.
 
 These are stated up front on purpose. The full analysis, including every residual risk, is
 in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
@@ -354,9 +355,76 @@ failed.
 The metric worth an alert is `blindbucket_integrity_failures_total{kind}`. It
 counts stored data that failed authentication, which means either a bug here or a
 provider modifying objects — and neither should be discovered by a user opening a
-file. The rest cover requests, upstream latency, bytes by direction and streams in
-flight; `blindbucket_active_streams` is the one that should track memory, since
-memory is a function of streams in flight and not of object size.
+file. `blindbucket_audit_failures_total` above zero is the second: it counts
+requests the audit log could not record, and each one is a gap in it. The rest
+cover requests, upstream latency, bytes by direction and streams in flight;
+`blindbucket_active_streams` is the one that should track memory, since memory is
+a function of streams in flight and not of object size.
+
+## The audit log
+
+The gateway is the one place where plaintext and identity meet: it knows which
+credential asked for which object and what came back, and it is the only
+component that does. It can keep that record in a form an intruder cannot quietly
+edit.
+
+```yaml
+audit:
+  log: /var/lib/blindbucket/audit.log
+```
+
+Every entry carries the hash of the entry before it, and the chain is signed with
+Ed25519 at intervals. Editing, reordering, removing or splicing anything before
+the last signature changes a hash that signature covers.
+
+**Verification needs the public key and nothing else** — not the keyring, not a
+passphrase, nothing that could also write a log. That is the reason for a
+signature rather than a MAC: an auditor can be given the log without being given
+the ability to forge one.
+
+```sh
+blindbucket audit pubkey --keyring keyring.json      # record this elsewhere, once
+blindbucket audit verify --public-key <key> audit.log
+```
+
+```
+audit.log: chain a004c7464dc442a0, 4 entries, 2026-09-13T11:52:13Z to 2026-09-13T11:52:13Z
+  last checkpoint: 4:5932f0b3b93ce8114117efc6f2ccfde2e5729d67c00930617fc18381afd9c811
+
+chain and signatures verified
+```
+
+Object names in the log are **encrypted**, so a log can be shipped off the host
+without giving away what the encrypted bucket does not. Reading them back is a
+separate privilege: `--keyring` decrypts, `--public-key` does not and does not
+need to.
+
+```
+$ blindbucket audit verify --keyring keyring.json --print audit.log
+     1  2026-09-13T11:52:13.284181Z  PutObject     200 backup-job   backups/2026/09/db.sql.zst  1073741824 bytes
+     2  2026-09-13T11:52:13.284218Z  GetObject     200 restore-job  backups/2026/09/db.sql.zst  1073741824 bytes
+     3  2026-09-13T11:52:13.284224Z  GetObject     403 AKIANOTOURS (rejected) backups/2026/09/db.sql.zst  [SignatureDoesNotMatch]
+     4  2026-09-13T11:52:13.284233Z  DeleteObject  204 backup-job   backups/2026/08/db.sql.zst
+```
+
+**Two things it does not do**, stated here rather than in a footnote.
+
+Entries written after the last checkpoint are chained but *not* signed. Whoever
+holds the file can delete them and what remains verifies perfectly — so the
+verifier reports how far the signatures reach, and `--expect <seq>:<hash>`
+compares against a checkpoint recorded somewhere the attacker does not control.
+A test asserts that this truncation is undetectable, so the limit cannot be
+quietly lost.
+
+And it is **not rollback protection**. It records what the gateway served; no
+read consults it, and residual risk §5.1 is exactly as open as it was. Turning
+this log into a version index is a different feature with a different cost, and
+[ADR-002](docs/adr/ADR-002-key-hierarchy.md) has the argument against.
+
+The design, the rejected alternatives — a Merkle tree, an HMAC, signing every
+entry, shipping the log upstream — and the measured costs are in
+[ADR-016](docs/adr/ADR-016-audit-log.md). An append is 3.6 µs against the 0.13 ms
+the gateway already costs per request.
 
 ## Documentation
 
@@ -366,6 +434,7 @@ memory is a function of streams in flight and not of object size.
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What is protected, what is not, and what the residual risks are. |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | Which clients work, which settings they need, and what does not work yet. Measured, not assumed. |
 | [docs/adr/](docs/adr/) | Architecture decisions, with the alternatives that were rejected and why. |
+| [docs/adr/ADR-016-audit-log.md](docs/adr/ADR-016-audit-log.md) | The audit log: what it proves, what it does not, and what it costs. |
 | [testdata/vectors/](testdata/vectors/) | Known-answer vectors, normative alongside the format spec. |
 | [ref/python/](ref/python/) | A second decoder written from the format spec alone, and the differential test that compares it against the Go one. |
 | [bench/](bench/) | Benchmark scripts, the figures they produce, and the methodology notes that came out of getting them wrong first. |
@@ -387,6 +456,7 @@ memory is a function of streams in flight and not of object size.
 | M5 | `blindbucket rotate`, metrics and health, benchmarks, release | **done** |
 | — | `CopyObject` and `UploadPartCopy`, deferred from M5 | **done** |
 | — | Vault Transit and AWS KMS as root-key sources, deferred from M5 | **done** |
+| — | Cryptographically verifiable audit log, hash-chained and signed | **done**, unreleased |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3
@@ -399,8 +469,11 @@ AWS credential chain is not used — KMS credentials are configured explicitly
 ([ADR-013](docs/adr/ADR-013-root-key-sources.md)). Object tags are refused rather than
 stored, because the provider would hold them in plaintext
 ([ADR-012](docs/adr/ADR-012-copy-semantics.md)). `ListMultipartUploads` is refused
-permanently and says why. And one benchmark cell is documented as the provider's behaviour
-rather than explained; the gateway's share of it is measured at 0.13 ms per request.
+permanently and says why. The audit log is per instance and has no cross-instance
+order, and entries after its last checkpoint are chained but unsigned — both by
+design, both in [ADR-016](docs/adr/ADR-016-audit-log.md). And one benchmark cell is
+documented as the provider's behaviour rather than explained; the gateway's share of it is
+measured at 0.13 ms per request.
 
 **Unsealing the keyring.** The root key can come from a passphrase, from Vault's Transit
 engine or from AWS KMS, and the keyring file records which one sealed it — so a keyring

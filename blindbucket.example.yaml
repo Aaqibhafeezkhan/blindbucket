@@ -59,6 +59,30 @@ keys:
 crypto:
   log2_chunk_size: 16                    # 64 KiB
 
+# A hash-chained, signed record of what the gateway served (ADR-016). Off unless
+# a path is given here. The keyring must hold an audit key -- keyrings created by
+# `blindbucket keygen` do; older ones need `keygen --add-audit-key`.
+#
+# Verify with:
+#   blindbucket audit verify --public-key <key> /var/lib/blindbucket/audit.log
+#
+# and record that public key somewhere this host does not control. A log checked
+# against a key taken from the same machine proves only that the two agree.
+# `blindbucket audit pubkey --keyring keyring.json` prints it.
+# audit:
+#   log: /var/lib/blindbucket/audit.log
+#   # How much of the tail an attacker holding the file could remove without
+#   # trace: whichever of these comes first bounds it. Fewer entries and shorter
+#   # intervals mean a smaller window and one fsync each.
+#   checkpoint_every: 256
+#   checkpoint_interval: 30s
+#   # Opening a log verifies it from the beginning, so this bounds startup.
+#   rotate_bytes: 134217728              # 128 MiB
+#   # Refuse requests once the log cannot be written, rather than serving on
+#   # with a record known to be incomplete. Defaults to true. Turning it off
+#   # means a full disk silently switches auditing off instead of paging you.
+#   fail_closed: true
+
 # Credentials the proxy accepts from its own clients. These are unrelated to the
 # upstream credentials above, which a client never sees -- that separation is
 # what stops a client bypassing the gateway.

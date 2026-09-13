@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/LennardGeissler/blindbucket/internal/audit"
 	"github.com/LennardGeissler/blindbucket/internal/auth"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -108,14 +110,32 @@ Flags:
 		return err
 	}
 
+	auditLog, err := openAuditLog(cfg, ring, log)
+	if err != nil {
+		return err
+	}
+	if auditLog != nil {
+		// Closed before the process exits so that the final checkpoint is
+		// written: without it the tail of the log is chained but unsigned, and
+		// an orderly shutdown would leave behind exactly the window that a
+		// checkpoint exists to close.
+		defer func() {
+			if err := auditLog.Close(); err != nil {
+				log.Error("the audit log did not close cleanly", "err", err)
+			}
+		}()
+	}
+
 	handler, err := proxy.New(proxy.Config{
-		Upstream:      client,
-		Keys:          ring,
-		Verifier:      verifier,
-		BaseDomain:    cfg.Server.BaseDomain,
-		Log2ChunkSize: cfg.Crypto.Log2ChunkSize,
-		Logger:        log,
-		Metrics:       metrics,
+		Upstream:        client,
+		Keys:            ring,
+		Verifier:        verifier,
+		BaseDomain:      cfg.Server.BaseDomain,
+		Log2ChunkSize:   cfg.Crypto.Log2ChunkSize,
+		Logger:          log,
+		Metrics:         metrics,
+		Audit:           auditLog,
+		AuditFailClosed: cfg.Audit.FailClosed,
 	})
 	if err != nil {
 		return err
@@ -173,6 +193,7 @@ Flags:
 		"clients", len(cfg.Clients),
 		"base_domain", cfg.Server.BaseDomain,
 		"tls", cfg.Server.TLS.Enabled(),
+		"audit", cfg.Audit.Log,
 	)
 	if cfg.ExposesPlaintextPublicly() {
 		log.Warn("this listener carries plaintext beyond loopback without TLS; " +
@@ -180,6 +201,10 @@ Flags:
 	}
 	if cfg.Server.AllowUnsignedPayload {
 		log.Warn("UNSIGNED-PAYLOAD is enabled; request bodies are not covered by the signature")
+	}
+	if auditLog != nil && !cfg.Audit.FailClosed {
+		log.Warn("audit.fail_closed is off; the gateway will keep serving if it can no " +
+			"longer record what it serves")
 	}
 
 	serveErr := make(chan error, 1)
@@ -206,6 +231,61 @@ Flags:
 		}
 		return nil
 	}
+}
+
+// openAuditLog starts the audit log, if one was configured.
+//
+// The keyring must already hold an audit key. Generating one here instead would
+// mean a gateway that silently starts signing with a key nobody has recorded,
+// and a log nobody can verify -- so a keyring without one is a startup error
+// naming the command that fixes it (ADR-016).
+func openAuditLog(cfg *config.Config, ring *keys.Keyring, log *slog.Logger) (*audit.Writer, error) {
+	if !cfg.Audit.Enabled() {
+		return nil, nil
+	}
+	key, ok := ring.AuditKey()
+	if !ok {
+		return nil, fmt.Errorf("audit.log is configured, but %s has no audit key; "+
+			"add one with `blindbucket keygen --out %s --add-audit-key`",
+			cfg.Keys.Keyring, cfg.Keys.Keyring)
+	}
+	signer, err := key.Signer()
+	if err != nil {
+		return nil, err
+	}
+	nameKey, err := key.NameKey()
+	if err != nil {
+		return nil, err
+	}
+	defer clear(nameKey)
+
+	interval, err := cfg.Audit.Interval()
+	if err != nil {
+		return nil, err
+	}
+	writer, err := audit.Open(audit.Config{
+		Path:               cfg.Audit.Log,
+		Chain:              cfg.Audit.Chain,
+		Signer:             signer,
+		NameKey:            nameKey,
+		CheckpointEvery:    cfg.Audit.CheckpointEvery,
+		CheckpointInterval: interval,
+		RotateBytes:        cfg.Audit.RotateBytes,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	pub, err := key.Public()
+	if err != nil {
+		return nil, err
+	}
+	log.Info("audit log open",
+		"path", cfg.Audit.Log,
+		"chain", writer.Chain(),
+		"fail_closed", cfg.Audit.FailClosed,
+		"public_key", base64.StdEncoding.EncodeToString(pub))
+	return writer, nil
 }
 
 func loadServerKeyring(ctx context.Context, cfg *config.Config, pass *passphraseFlags) (*keys.Keyring, error) {

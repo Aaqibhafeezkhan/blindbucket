@@ -19,6 +19,14 @@ var ErrUnknownKID = errors.New("keys: unknown key id")
 // indistinguishable to an attacker and should stay that way.
 var ErrUnwrap = errors.New("keys: unwrapping failed")
 
+// ErrNoAuditKey reports a keyring that carries no audit-log key.
+//
+// Every keyring written before audit logging existed is such a keyring, so this
+// is an ordinary state and not a corruption. It is distinct so that a caller can
+// tell "this keyring predates the feature" -- which `keygen --add-audit-key`
+// fixes -- from "this keyring is damaged", which it does not.
+var ErrNoAuditKey = errors.New("keys: this keyring has no audit key")
+
 // KeyProvider is where key-encryption keys come from.
 //
 // Implementations wrap and unwrap data keys under a KEK identified by kid, and

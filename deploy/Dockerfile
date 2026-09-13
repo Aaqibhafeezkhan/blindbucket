@@ -29,6 +29,10 @@ COPY --from=build /out/blindbucket /blindbucket
 
 # 65532 is distroless's nonroot user. The keyring must be readable by it and by
 # nobody else; mount it read-only.
+#
+# There is no writable directory in this image. A deployment that enables the
+# audit log has to mount one and make it writable by 65532 -- see
+# deploy/kubernetes-sidecar.yaml.
 USER 65532:65532
 EXPOSE 9000 9100
 

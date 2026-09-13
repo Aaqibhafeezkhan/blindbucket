@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -23,6 +24,53 @@ type Config struct {
 	Keys     Keys     `yaml:"keys"`
 	Crypto   Crypto   `yaml:"crypto"`
 	Admin    Admin    `yaml:"admin"`
+	Audit    Audit    `yaml:"audit"`
+}
+
+// Audit configures the hash-chained, signed record of what the gateway served
+// (ADR-016).
+//
+// It is off unless a path is given. A gateway that wrote an audit log by default
+// would write one to a path nobody chose, with a key nobody published, and the
+// result would look like evidence without being any.
+type Audit struct {
+	// Log is the file to append to. Empty disables audit logging entirely.
+	Log string `yaml:"log"`
+	// Chain names this chain. Empty generates one per file, which is what a
+	// deployment wants: instances must not share a chain, because a chain is a
+	// sequence and two writers would fight over its order.
+	Chain string `yaml:"chain"`
+	// CheckpointEvery is how many entries pass before the chain is signed and
+	// flushed. Together with CheckpointInterval it bounds how much of the tail
+	// an attacker holding the file could remove undetectably.
+	CheckpointEvery int `yaml:"checkpoint_every"`
+	// CheckpointInterval bounds the same window in time, for a gateway too
+	// quiet to reach the entry count. A Go duration: "30s", "5m".
+	CheckpointInterval string `yaml:"checkpoint_interval"`
+	// RotateBytes is the size at which the log is archived and a new file
+	// started. Opening a log verifies it from the beginning, so this is what
+	// keeps startup bounded.
+	RotateBytes int64 `yaml:"rotate_bytes"`
+	// FailClosed refuses requests once an append has failed, rather than
+	// serving on with a record known to be incomplete. It defaults to true,
+	// because the attack it guards against -- filling a disk to switch auditing
+	// off -- is cheap against a log that degrades quietly.
+	FailClosed bool `yaml:"fail_closed"`
+}
+
+// Enabled reports whether audit logging was asked for.
+func (a Audit) Enabled() bool { return a.Log != "" }
+
+// Interval parses CheckpointInterval. Zero selects the package default.
+func (a Audit) Interval() (time.Duration, error) {
+	if a.CheckpointInterval == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(a.CheckpointInterval)
+	if err != nil {
+		return 0, fmt.Errorf("audit.checkpoint_interval: %w", err)
+	}
+	return d, nil
 }
 
 // Admin is the operator-facing listener: metrics, health and, if asked for,
@@ -219,6 +267,11 @@ func Load(path string) (*Config, error) {
 		Server: Server{Listen: "127.0.0.1:9000"},
 		Keys:   Keys{Provider: "file"},
 		Crypto: Crypto{Log2ChunkSize: stream.DefaultLog2ChunkSize},
+		// Defaults that are not the zero value go here rather than after the
+		// decode: yaml.v3 leaves a field alone when the file does not mention
+		// it, so this is also what makes an explicit "fail_closed: false"
+		// distinguishable from an absent one.
+		Audit: Audit{FailClosed: true},
 	}
 	// KnownFields makes a typo in a key an error rather than a silently ignored
 	// setting -- which for something like path_style would mean every request
@@ -341,6 +394,26 @@ func (c *Config) validate() error {
 	}
 	if (c.Server.TLS.CertFile == "") != (c.Server.TLS.KeyFile == "") {
 		return fmt.Errorf("server.tls needs both cert_file and key_file, or neither")
+	}
+	return c.Audit.validate()
+}
+
+func (a Audit) validate() error {
+	if !a.Enabled() {
+		return nil
+	}
+	switch {
+	case a.CheckpointEvery < 0:
+		return fmt.Errorf("audit.checkpoint_every must not be negative")
+	case a.RotateBytes < 0:
+		return fmt.Errorf("audit.rotate_bytes must not be negative")
+	}
+	interval, err := a.Interval()
+	if err != nil {
+		return err
+	}
+	if interval < 0 {
+		return fmt.Errorf("audit.checkpoint_interval must not be negative")
 	}
 	return nil
 }

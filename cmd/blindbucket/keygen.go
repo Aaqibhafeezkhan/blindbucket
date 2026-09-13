@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,9 +33,11 @@ Flags:
 	}
 
 	var (
-		out  = fs.String("out", "", "keyring file to write (required)")
-		kid  = fs.String("kid", defaultKID(), "id of the key to create")
-		add  = fs.Bool("add", false, "add a key to an existing keyring instead of creating one")
+		out      = fs.String("out", "", "keyring file to write (required)")
+		kid      = fs.String("kid", defaultKID(), "id of the key to create")
+		add      = fs.Bool("add", false, "add a key to an existing keyring instead of creating one")
+		addAudit = fs.Bool("add-audit-key", false,
+			"add an audit-log signing key to an existing keyring; new keyrings get one anyway")
 		act  = fs.Bool("activate", true, "with --add, make the new key the active one")
 		conf = fs.String("config", "",
 			"configuration file naming the root-key provider (default: a passphrase)")
@@ -64,8 +67,11 @@ Flags:
 		}
 	}
 
-	if *add {
-		return addKey(ctx, *out, *kid, *act, keysCfg, &pass)
+	switch {
+	case *addAudit && !*add:
+		return addAuditKey(ctx, *out, keysCfg, &pass)
+	case *add:
+		return addKey(ctx, *out, *kid, *act, *addAudit, keysCfg, &pass)
 	}
 	return createKeyring(ctx, *out, *kid, keysCfg, &pass)
 }
@@ -133,6 +139,16 @@ func createKeyring(
 	if err := ring.Generate(kid); err != nil {
 		return err
 	}
+	// Every new keyring gets an audit key, whether or not audit logging is
+	// configured. It is 32 wrapped bytes and inert until something uses it,
+	// against the alternative of having to reseal the keyring of a running
+	// deployment on the day an audit log is first wanted.
+	audit, err := keys.NewAuditKey()
+	if err != nil {
+		return err
+	}
+	ring.SetAuditKey(audit)
+
 	data, err := sealKeyring(ctx, ring, cfg, pass, true)
 	if err != nil {
 		return err
@@ -143,7 +159,61 @@ func createKeyring(
 
 	fmt.Fprintf(os.Stderr, "wrote %s with key %q (active), sealed by %s\n",
 		path, kid, sealedBy(cfg))
+	return printAuditPublicKey(ring)
+}
+
+// printAuditPublicKey tells the operator the value a verifier will need.
+//
+// Printed at creation because that is the moment it can still be recorded
+// somewhere else. A public key retrieved later from the same host as the log is
+// worth much less: see ADR-016 and `blindbucket audit pubkey`.
+func printAuditPublicKey(ring *keys.Keyring) error {
+	key, ok := ring.AuditKey()
+	if !ok {
+		return nil
+	}
+	pub, err := key.Public()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr,
+		"audit log public key: %s\n"+
+			"  Record this somewhere the gateway host does not control. It is what\n"+
+			"  verifies an audit log, and it is all that is needed to.\n",
+		base64.StdEncoding.EncodeToString(pub))
 	return nil
+}
+
+// addAuditKey gives an existing keyring an audit key.
+func addAuditKey(ctx context.Context, path string, cfg config.Keys, pass *passphraseFlags) error {
+	ring, err := openKeyring(ctx, path, cfg, pass)
+	if err != nil {
+		return err
+	}
+	// Refused rather than replaced. A new audit key is a new public key, and
+	// every log written under the old one stops verifying against the keyring --
+	// which is indistinguishable, to whoever checks it later, from the logs
+	// having been forged.
+	if _, exists := ring.AuditKey(); exists {
+		return fmt.Errorf("%s already has an audit key; replacing it would leave every "+
+			"log written under the old one unverifiable against this keyring", path)
+	}
+
+	audit, err := keys.NewAuditKey()
+	if err != nil {
+		return err
+	}
+	ring.SetAuditKey(audit)
+
+	updated, err := sealKeyring(ctx, ring, cfg, pass, false)
+	if err != nil {
+		return err
+	}
+	if err := writeKeyring(path, updated); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "added an audit key to %s\n", path)
+	return printAuditPublicKey(ring)
 }
 
 // sealedBy names the root-key source for the operator's confirmation line.
@@ -159,7 +229,8 @@ func sealedBy(cfg config.Keys) string {
 }
 
 func addKey(
-	ctx context.Context, path, kid string, activate bool, cfg config.Keys, pass *passphraseFlags,
+	ctx context.Context, path, kid string, activate, withAudit bool,
+	cfg config.Keys, pass *passphraseFlags,
 ) error {
 	ring, err := openKeyring(ctx, path, cfg, pass)
 	if err != nil {
@@ -172,6 +243,17 @@ func addKey(
 		if err := ring.SetActive(kid); err != nil {
 			return err
 		}
+	}
+	if withAudit {
+		if _, exists := ring.AuditKey(); exists {
+			return fmt.Errorf("%s already has an audit key; replacing it would leave every "+
+				"log written under the old one unverifiable against this keyring", path)
+		}
+		audit, err := keys.NewAuditKey()
+		if err != nil {
+			return err
+		}
+		ring.SetAuditKey(audit)
 	}
 
 	// Re-sealed rather than patched: a new root key on every write means a
@@ -186,6 +268,9 @@ func addKey(
 	}
 
 	fmt.Fprintf(os.Stderr, "added key %q to %s (active key: %q)\n", kid, path, ring.ActiveKID())
+	if withAudit {
+		return printAuditPublicKey(ring)
+	}
 	return nil
 }
 

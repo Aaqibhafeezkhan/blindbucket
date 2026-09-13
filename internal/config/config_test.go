@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func write(t *testing.T, body string) string {
@@ -202,5 +203,87 @@ func TestExposesPlaintextPublicly(t *testing.T) {
 		if got := cfg.ExposesPlaintextPublicly(); got != tc.want {
 			t.Errorf("listen=%q tls=%t: got %t, want %t", tc.listen, tc.tls, got, tc.want)
 		}
+	}
+}
+
+func TestAuditIsOffUnlessAPathIsGiven(t *testing.T) {
+	cfg, err := Load(write(t, minimal))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Audit.Enabled() {
+		t.Error("audit logging is on without a path")
+	}
+}
+
+// TestAuditFailsClosedByDefault is the one default here that has to be the safe
+// one: the attack it guards against is filling a disk to switch auditing off.
+func TestAuditFailsClosedByDefault(t *testing.T) {
+	cfg, err := Load(write(t, minimal+`
+audit:
+  log: /var/lib/blindbucket/audit.log
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	switch {
+	case !cfg.Audit.Enabled():
+		t.Error("audit logging is off although a path was given")
+	case !cfg.Audit.FailClosed:
+		t.Error("fail_closed defaults to false; it must default to true")
+	}
+}
+
+// TestAuditFailClosedCanBeTurnedOff checks that an explicit false survives the
+// default above, which a plain bool with a non-zero default would otherwise eat.
+func TestAuditFailClosedCanBeTurnedOff(t *testing.T) {
+	cfg, err := Load(write(t, minimal+`
+audit:
+  log: /var/lib/blindbucket/audit.log
+  fail_closed: false
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Audit.FailClosed {
+		t.Error("an explicit fail_closed: false was overwritten by the default")
+	}
+}
+
+func TestAuditIntervalIsParsed(t *testing.T) {
+	cfg, err := Load(write(t, minimal+`
+audit:
+  log: /var/lib/blindbucket/audit.log
+  checkpoint_interval: 90s
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	interval, err := cfg.Audit.Interval()
+	if err != nil {
+		t.Fatalf("Interval: %v", err)
+	}
+	if interval != 90*time.Second {
+		t.Errorf("checkpoint_interval parsed to %s, want 90s", interval)
+	}
+}
+
+func TestAuditRejectsNonsense(t *testing.T) {
+	cases := map[string]string{
+		"an unparseable interval": "checkpoint_interval: soon",
+		"a negative interval":     "checkpoint_interval: -5s",
+		"a negative count":        "checkpoint_every: -1",
+		"a negative rotate size":  "rotate_bytes: -1",
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(write(t, minimal+`
+audit:
+  log: /var/lib/blindbucket/audit.log
+  `+line+"\n"))
+			if err == nil {
+				t.Errorf("%s was accepted", name)
+			}
+		})
 	}
 }

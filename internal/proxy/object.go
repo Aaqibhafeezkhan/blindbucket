@@ -155,6 +155,7 @@ func (p *Proxy) putObject(
 	w.WriteHeader(http.StatusOK)
 	p.metrics.Bytes(obs.InPlain, plainLen)
 	p.metrics.Bytes(obs.OutCipher, sealedLen)
+	p.noteObject(r, kid, plainLen)
 	log.Info("object stored", "plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen, "kid", kid)
 	return nil
 }
@@ -212,8 +213,11 @@ func (p *Proxy) getObject(w http.ResponseWriter, r *http.Request, req s3api.Requ
 	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, reader)
 	p.metrics.Bytes(obs.InCipher, out.ContentLength)
 	p.metrics.Bytes(obs.OutPlain, written)
+	// Noted before the abort check, so that a download cut off by a failing
+	// chunk is recorded with what it actually delivered rather than not at all.
+	p.noteObject(r, meta.KeyID, written)
 	if copyErr != nil {
-		p.abortResponse(log, written, plainLen, copyErr)
+		p.abortResponse(r, log, written, plainLen, copyErr)
 	}
 	log.Info("object served", "plaintext_bytes", plainLen, "kid", meta.KeyID)
 	return nil
@@ -329,8 +333,9 @@ func (p *Proxy) getObjectRange(
 	defer guard.clear()
 
 	written, copyErr := io.Copy(guardedWriter{dst: w, guard: guard}, reader)
+	p.noteObject(r, meta.KeyID, written)
 	if copyErr != nil {
-		p.abortResponse(log, written, rng.Length, copyErr)
+		p.abortResponse(r, log, written, rng.Length, copyErr)
 	}
 	log.Info("range served", "start", start, "end", end, "bytes", rng.Length, "kid", meta.KeyID)
 	return nil
@@ -369,6 +374,9 @@ func (p *Proxy) headObject(w http.ResponseWriter, r *http.Request, req s3api.Req
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.FormatInt(plainLen, 10))
 	w.WriteHeader(http.StatusOK)
+	// A HEAD moves no object data, so the byte count is zero and the key id is
+	// the whole of what it contributes.
+	p.noteObject(r, meta.KeyID, 0)
 	return nil
 }
 
@@ -476,9 +484,16 @@ func (p *Proxy) openSegment(
 // There is no legal way to report a failure here: appending an error document
 // would hand the client bytes it would read as object content. A short read
 // against the declared Content-Length is unmistakable instead.
-func (p *Proxy) abortResponse(log *slog.Logger, written, expected int64, err error) {
+func (p *Proxy) abortResponse(
+	r *http.Request, log *slog.Logger, written, expected int64, err error,
+) {
 	log.Error("aborting response after an integrity or transport failure",
 		"written_bytes", written, "expected_bytes", expected, "err", err)
+	// The audit record is written by a deferred call that this panic unwinds
+	// through, so the code is set here for it to pick up. Without it the entry
+	// would say 200 and nothing else, which is the status the client was
+	// promised but not what happened.
+	p.noteCode(r, s3api.ErrIntegrity.Code)
 	panic(http.ErrAbortHandler)
 }
 

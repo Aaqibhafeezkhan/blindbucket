@@ -285,6 +285,7 @@ func (p *Proxy) uploadPart(
 	w.WriteHeader(http.StatusOK)
 	p.metrics.Bytes(obs.InPlain, plainLen)
 	p.metrics.Bytes(obs.OutCipher, sealedLen)
+	p.noteObject(r, token.KID, plainLen)
 	log.Info("part stored", "part", req.PartNumber,
 		"plaintext_bytes", plainLen, "ciphertext_bytes", sealedLen)
 	return nil
@@ -402,6 +403,7 @@ func (p *Proxy) completeMultipartUpload(
 	if out.VersionID != "" {
 		w.Header().Set("x-amz-version-id", out.VersionID)
 	}
+	p.noteObject(r, token.KID, m.PlainSize())
 	log.Info("multipart upload completed",
 		"parts", len(parts), "plaintext_bytes", m.PlainSize(), "manifest_id", token.ManifestID.String())
 	return writeXML(w, http.StatusOK, completeResult{

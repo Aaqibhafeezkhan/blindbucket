@@ -1,13 +1,14 @@
 # blindbucket Wire Format — Version 1
 
 **Status:** Normative for format version `1`, and implemented as specified.
-**Last updated:** 2026-09-12 (clarifications from the independent reference decoder;
-the manifest and upload token of sections 10 and 11 became normative with M4)
+**Last updated:** 2026-09-13 (section 14, the audit log, added with `internal/audit`;
+before that, clarifications from the independent reference decoder, and the manifest
+and upload token of sections 10 and 11 becoming normative with M4)
 
 Every section is implemented. Sections 4 to 9 live in `internal/crypto/stream`,
 `internal/crypto/keys` and `internal/crypto/envelope` and are pinned by the
-known-answer vectors of section 13; section 10 is `internal/manifest` and
-section 11 is `internal/upload`.
+known-answer vectors of section 13; section 10 is `internal/manifest`, section 11
+is `internal/upload`, and section 14 is `internal/audit`.
 
 This document is the authoritative specification of the bytes blindbucket writes to
 object storage. It is written so that an independent implementation can interoperate
@@ -620,8 +621,146 @@ A change that was *not* deliberate shows up as a failure of that same test.
 
 ---
 
-## 14. Version history
+## 14. Audit log (`v1`)
+
+This section is not part of the object format. Nothing here is written to object
+storage: an audit log is a local file, and it is specified here for the same
+reason as the local file format of §9 — it is bytes blindbucket writes that
+something else has to be able to read. The design is
+[ADR-016](adr/ADR-016-audit-log.md).
+
+### 14.1 File layout
+
+A log is a sequence of newline-terminated JSON objects, one record per line. The
+first record MUST be a `head`; every later record is an `entry` or a
+`checkpoint`. A decoder MUST reject a record carrying more than one body, a
+record whose `type` does not match the body present, and any field not defined
+below — an unknown field is data that no hash covers.
+
+```
+{"type":"head","head":{…}}
+{"type":"entry","entry":{…}}
+{"type":"checkpoint","checkpoint":{…}}
+```
+
+| Record | Fields |
+|---|---|
+| `head` | `v`, `chain`, `opened`, `pubkey`, `prev_chain`, `prev_hash`, `hash` |
+| `entry` | `seq`, `time`, `op`, `bucket`, `key`, `client`, `principal`, `request_id`, `status`, `code`, `kid`, `bytes`, `hash` |
+| `checkpoint` | `seq`, `time`, `hash`, `sig` |
+
+`v` is the log format version and is `1`. `pubkey` and `sig` are standard
+base64; `hash`, `prev_hash` and a checkpoint's `hash` are lowercase hex.
+Timestamps are RFC 3339 with nanosecond precision, in UTC.
+
+### 14.2 The chain
+
+Hashes are computed over the **fields**, never over the serialised line. JSON has
+no canonical form — key order, escaping and whitespace are all free — so a
+decoder that hashed the bytes of a line would disagree with the encoder on
+re-serialised but unchanged input, and could be made to agree on changed input.
+A decoder MUST recompute from the parsed fields and compare.
+
+With `lp()` as defined in §1:
+
+```
+h₀ = SHA-256("blindbucket/v1/audit-head"
+             || uint32_be(v) || lp(chain) || lp(opened)
+             || lp(pubkey) || lp(prev_chain) || lp(prev_hash))
+
+hₙ = SHA-256("blindbucket/v1/audit-entry"
+             || uint64_be(seq) || lp(chain) || lp(time) || lp(op)
+             || lp(bucket) || lp(key) || lp(client) || lp(principal)
+             || lp(request_id) || lp(code) || lp(kid)
+             || uint32_be(status) || uint64_be(bytes)
+             || lp(hₙ₋₁))
+```
+
+`pubkey`, `prev_hash` and `hₙ₋₁` are length-prefixed in their **textual** form —
+the base64 and hex strings as they appear in the file — not as decoded bytes. A
+decoder MUST NOT decode them before hashing.
+
+The hash of the head is `h₀`; the hash of entry *n* is `hₙ`. A decoder MUST
+check that entry *n* has `seq` exactly one greater than the entry before it, and
+that its recorded `hash` equals the recomputed `hₙ`.
+
+`bytes` MUST be at least 0 and `status` MUST be in 0..999. Both are hashed as
+fixed-width unsigned integers, and a decoder MUST reject a record outside these
+bounds rather than convert it: a negative value would wrap consistently and so
+would verify, leaving a record that reads as an enormous transfer.
+
+The chain id is inside every entry's hash, so a genuine entry from one chain
+cannot be spliced into another.
+
+### 14.3 Checkpoints
+
+A checkpoint asserts that the chain stood at `hash` after `seq` entries. It is
+not a link in the chain: it does not advance `hₙ`, and removing one breaks no
+hash. A decoder MUST check that a checkpoint's `seq` and `hash` equal the
+chain's state at the point the checkpoint appears.
+
+The signature is Ed25519 (RFC 8032) over:
+
+```
+SHA-256("blindbucket/v1/audit-checkpoint"
+        || uint64_be(seq) || lp(chain) || lp(time) || lp(hash))
+```
+
+Note that what is signed is the 32-byte SHA-256 output, not the message itself.
+
+Entries after the last checkpoint are covered by the chain but by no signature.
+A verifier MUST be able to report how far the signatures reach, because the
+difference is what an attacker holding the file can remove undetectably.
+
+### 14.4 Rotation
+
+When a log is rotated, the new file's head records the previous file's `chain`
+in `prev_chain` and its final chain hash in `prev_hash`; both are empty in the
+first file of a sequence. A verifier given several files MUST check those links,
+so that a file removed from the middle of a sequence is a break rather than a
+gap.
+
+Sequence numbers restart at 1 in each file. A chain hash does not.
+
+### 14.5 Names
+
+`bucket` and `key` hold the deterministic per-segment name encryption of
+[ADR-015](adr/ADR-015-object-name-encryption.md), implemented in
+`internal/crypto/names`, under a key derived from the audit secret. They are
+therefore opaque without the keyring, and deterministic with it.
+
+A name whose encrypted form would exceed `names.MaxStoredKey` is recorded
+instead as `"h:" || hex(HMAC-SHA256(nameKey, "blindbucket/v1/audit-name-digest" || name))`.
+This cannot be confused with an encrypted name: those are base32 over the
+uppercase alphabet `A-Z2-7` joined by `/`, in which a lowercase letter cannot
+occur. Such a name is not recoverable.
+
+`client`, `principal`, `op`, `code` and `kid` are in clear.
+
+### 14.6 Keys
+
+The audit secret is 32 bytes, stored in the keyring wrapped under the root key
+with the associated data `"blindbucket/v1/audit-secret"` and no variable part.
+Two keys are derived from it:
+
+```
+signSeed = HKDF-SHA256(secret, info = "blindbucket/v1/audit-sign",  L = 32)
+nameKey  = HKDF-SHA256(secret, info = "blindbucket/v1/audit-name",  L = 32)
+```
+
+with an empty salt. `signSeed` is the Ed25519 seed. The corresponding public key
+is stored in the keyring **unwrapped**, and an implementation opening a keyring
+MUST re-derive it and reject a file where the stored and derived values differ.
+
+---
+
+## 15. Version history
 
 | Format version | Status | Change |
 |---|---|---|
 | `1` | draft | Initial specification. |
+
+The audit log of section 14 carries its own version, in the `v` field of each
+head. It is at `1`, and it moves independently of the object format above: the
+two describe different files, and a change to one has no reason to invalidate
+readers of the other.

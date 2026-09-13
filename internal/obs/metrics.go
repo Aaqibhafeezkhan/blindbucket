@@ -50,6 +50,8 @@ type Metrics struct {
 	integrityFailures *prometheus.CounterVec
 	authFailures      *prometheus.CounterVec
 	checksumMismatch  *prometheus.CounterVec
+	auditFailures     prometheus.Counter
+	auditBroken       prometheus.Gauge
 }
 
 // NewMetrics registers the collectors and returns them.
@@ -100,6 +102,22 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "blindbucket_checksum_mismatches_total",
 			Help: "Uploads whose end-to-end checksum did not match, by algorithm.",
 		}, []string{"algorithm"}),
+
+		// Two metrics rather than one, because they answer different questions.
+		// The counter says how many records were lost; the gauge says whether
+		// the gateway is currently refusing traffic over it, which is the one an
+		// alert should fire on.
+		auditFailures: factory.counter(prometheus.CounterOpts{
+			Name: "blindbucket_audit_failures_total",
+			Help: "Requests the audit log could not record. Any value above zero " +
+				"means the log has a gap and should alert.",
+		}),
+
+		auditBroken: factory.gauge(prometheus.GaugeOpts{
+			Name: "blindbucket_audit_broken",
+			Help: "1 while the audit log cannot be written. With fail_closed the " +
+				"gateway is refusing requests.",
+		}),
 	}
 }
 
@@ -157,6 +175,17 @@ func (m *Metrics) AuthFailure(reason string) {
 	}
 }
 
+// AuditFailure records a request the audit log could not record.
+//
+// It also raises blindbucket_audit_broken, because the writer is sticky: one
+// failed append means every later one fails too, until an operator intervenes.
+func (m *Metrics) AuditFailure() {
+	if m != nil {
+		m.auditFailures.Inc()
+		m.auditBroken.Set(1)
+	}
+}
+
 // ChecksumMismatch records an upload whose checksum did not match.
 func (m *Metrics) ChecksumMismatch(algorithm string) {
 	if m != nil {
@@ -191,6 +220,18 @@ func (p promauto) counterVec(opts prometheus.CounterOpts, labels []string) *prom
 	c := prometheus.NewCounterVec(opts, labels)
 	p.register(c)
 	return c
+}
+
+func (p promauto) counter(opts prometheus.CounterOpts) prometheus.Counter {
+	c := prometheus.NewCounter(opts)
+	p.register(c)
+	return c
+}
+
+func (p promauto) gauge(opts prometheus.GaugeOpts) prometheus.Gauge {
+	g := prometheus.NewGauge(opts)
+	p.register(g)
+	return g
 }
 
 func (p promauto) histogramVec(opts prometheus.HistogramOpts, labels []string) *prometheus.HistogramVec {

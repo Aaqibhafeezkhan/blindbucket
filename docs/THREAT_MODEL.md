@@ -1,7 +1,9 @@
 # Threat Model
 
-**Status:** Current as of `v0.2.0`, the release that closed the retry-substitution
-risk of section 5.2 with part salts in the manifest
+**Status:** Current as of `main`. Section 5.8, the audit log, is on `main` and not
+in any release yet ([ADR-016](adr/ADR-016-audit-log.md)); everything else stands
+as of `v0.2.0`, the release that closed the retry-substitution risk of section 5.2
+with part salts in the manifest
 ([ADR-014](adr/ADR-014-part-salts-in-the-manifest.md)). Revised at every milestone
 that adds an attack surface.
 
@@ -60,7 +62,8 @@ must reside in the same trust domain as the clients it serves.
 | Binding of content to bucket and key | **Yes** | Bucket and key as associated data when wrapping the DEK |
 | Detection of reordered or missing parts | **Yes** | Part number in the authenticated segment header; MAC-protected manifest |
 | Client authentication | **Yes** | SigV4 with proxy-specific credentials, constant-time comparison |
-| Rollback to an older genuine version of the same key | **No** | Residual risk, §5.1 |
+| Tamper evidence of the audit log, once written | **Yes**, with limits | Hash chain and signed checkpoints, §5.8 |
+| Rollback to an older genuine version of the same key | **No** | Residual risk, §5.1. **The audit log does not change this** |
 | Confidentiality of names, sizes, timestamps | **No** | §4 |
 | Authenticity of sizes reported in listings | **No** | Computed from unauthenticated upstream data, §5.4 |
 | Availability | **No** | The provider can delete or refuse access |
@@ -96,6 +99,17 @@ sets a tag is told, instead of believing the object carries one.
 Content *is* hidden. Metadata is not. For workloads where the object names themselves are
 sensitive, this matters, and M6 lists deterministic name encryption as a stretch goal.
 
+**The audit log sees the same names, and hides them the same way.** When audit
+logging is enabled, the bucket and key of every request are written to a local
+file — encrypted with the deterministic per-segment construction of ADR-015, so
+that the file can be shipped off the host without giving away what the encrypted
+bucket does not. It inherits that construction's leakage exactly: determinism
+does not hide equality, so someone holding the log can confirm a guessed name,
+and repeated access to one object is visible as repeated access to *something*.
+What the log does record in clear is the operator's own vocabulary — the
+credential's configured name, the operation, the key id, the status, the byte
+count — and, for a rejected request, the access key id that was attempted.
+
 ---
 
 ## 5. Residual risks
@@ -110,6 +124,13 @@ from "previous".
 Detecting this requires an external, authenticated index of versions, which would
 reintroduce the shared mutable state that the stateless design avoids (ADR-002). Mitigation
 is deferred to M6 and is currently **accepted risk**.
+
+The audit log of §5.8 does not change this, and is worth naming here because its
+name invites the assumption that it does. That log records what the gateway
+*served*; it is not consulted on a read, and it is not an authority on which
+version of an object is current. Building it into one is the deferred mitigation
+above, not a side effect of the log existing
+([ADR-016](adr/ADR-016-audit-log.md)).
 
 ### 5.2 Retry substitution within a multipart upload — mitigated
 
@@ -182,6 +203,40 @@ Timing and cache attacks against the proxy host are out of scope (they fall unde
 AES-GCM uses hardware acceleration with constant-time behaviour on the platforms Go targets
 (AES-NI, ARMv8 Crypto Extensions), and signature comparisons use `hmac.Equal`.
 
+### 5.8 Audit log: the truncation window, and the key on the host
+
+Audit logging (`audit.log` in the configuration,
+[ADR-016](adr/ADR-016-audit-log.md)) makes a record that an intruder cannot
+quietly edit: every entry hashes onto the one before it, and the chain is signed
+with Ed25519 at intervals. Editing, reordering, removing or splicing anything
+before the last signature changes a hash that signature covers. Verification
+needs the public key and nothing else, so an auditor can be given the log without
+being given anything that could write one.
+
+Two limits, and both are the interesting part.
+
+**Entries after the last checkpoint are chained but not signed.** Whoever holds
+the file can delete them, and what remains verifies perfectly. The window is
+bounded by `checkpoint_every` and `checkpoint_interval` and by nothing else.
+Closing it means comparing against a checkpoint recorded somewhere the attacker
+does not control — which is what `blindbucket audit verify --expect` takes and
+why the verifier prints how far the signatures reach instead of only a verdict.
+This is **accepted risk**, and narrowing it is an operator's trade against an
+fsync per checkpoint.
+
+**The signing key is on the gateway host.** Against A5 — anyone who controls the
+proxy host — this proves nothing: they can write entries that verify, and §2
+already says they have everything. What the log protects is itself *after it
+leaves*: a copy, a backup, an archive, the file an intruder reaches an hour
+later. That is a narrower claim than "audit log" usually implies, and it is the
+one being made.
+
+A third thing, smaller but real: a record is written once a request's outcome is
+known, so a failure to write one cannot withhold the response it describes. With
+`fail_closed` the gateway refuses the *next* request instead. Exactly one request
+can therefore be served without a record, and the log shows where — the chain
+stops.
+
 ---
 
 ## 6. Non-goals
@@ -205,4 +260,16 @@ tampering, header manipulation, object and metadata swapping, multipart reorderi
 forgery, checksum mismatch and authentication failures.
 
 `blindbucket_integrity_failures_total` is exported as a metric. A sustained increase means
-either a bug or an actively misbehaving provider, and should alert.
+either a bug or an actively misbehaving provider, and should alert. So does
+`blindbucket_audit_failures_total` above zero: it counts requests the audit log
+could not record, and each one is a gap in it.
+
+The audit log's own guarantees are tested the same adversarial way, in
+`internal/audit/attack_test.go`: an entry edited, an entry edited and re-hashed,
+an entry removed, two reordered, one duplicated, a genuine entry spliced in from
+another chain, a checkpoint moved, a checkpoint re-signed with another key, a
+public key swapped in the head, and a whole log forged end to end under an
+attacker's key. Each must be rejected. One test asserts the opposite — that
+truncation past the last checkpoint is *not* detected — so that §5.8's limit
+cannot be quietly lost. `FuzzVerify` covers the verifier against arbitrary
+input, which is what a log file is.

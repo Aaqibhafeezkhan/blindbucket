@@ -1,7 +1,9 @@
 package keys
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -30,6 +32,10 @@ type Keyring struct {
 	active  string
 	keks    map[string][KeySize]byte
 	created map[string]time.Time
+	// audit is the optional audit-log key. A keyring written before audit
+	// logging existed has none, which is why it is a pointer and why every
+	// reader has to handle its absence rather than assume a zero key.
+	audit *AuditKey
 }
 
 // NewKeyring returns an empty keyring.
@@ -83,6 +89,20 @@ func (r *Keyring) SetActive(kid string) error {
 	}
 	r.active = kid
 	return nil
+}
+
+// SetAuditKey installs the audit-log key, replacing any existing one.
+func (r *Keyring) SetAuditKey(k *AuditKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.audit = k
+}
+
+// AuditKey returns the audit-log key, and whether the keyring has one.
+func (r *Keyring) AuditKey() (*AuditKey, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.audit, r.audit != nil
 }
 
 // ActiveKID implements KeyProvider.
@@ -218,6 +238,23 @@ type keyringFile struct {
 	// omitempty does nothing for a struct value.
 	KDF  *KDFParams `json:"kdf,omitempty"`
 	Keys []keyEntry `json:"keys"`
+	// Audit is the audit-log key, absent in a keyring that has none. It is
+	// optional rather than a format version bump so that a keyring written
+	// before audit logging existed keeps loading unchanged.
+	Audit *auditEntry `json:"audit_key,omitempty"`
+}
+
+// auditEntry is the audit key as it is stored: the secret wrapped under the root
+// key, and the Ed25519 public key in clear.
+//
+// The public half is unprotected on purpose -- it is what lets someone verify a
+// log without being handed anything that can write one. It is not therefore
+// unchecked: openKeyring re-derives it from the unwrapped secret and refuses a
+// file where the two disagree, so an attacker who swaps in a public key they
+// hold cannot make a forged log verify against this keyring.
+type auditEntry struct {
+	Wrapped   string `json:"wrapped"`
+	PublicKey string `json:"public_key"`
 }
 
 type keyEntry struct {
@@ -294,11 +331,37 @@ func (r *Keyring) marshal(rootKey []byte, ref RootKeyRef, params *KDFParams) ([]
 		})
 	}
 
+	if r.audit != nil {
+		entry, err := sealAudit(rootKey, r.audit)
+		if err != nil {
+			return nil, err
+		}
+		file.Audit = entry
+	}
+
 	out, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(out, '\n'), nil
+}
+
+// sealAudit wraps the audit secret and records its public key.
+func sealAudit(rootKey []byte, key *AuditKey) (*auditEntry, error) {
+	secret := key.Secret()
+	defer clear(secret)
+	wrapped, err := sealKey(rootKey, secret, auditAAD())
+	if err != nil {
+		return nil, err
+	}
+	pub, err := key.Public()
+	if err != nil {
+		return nil, err
+	}
+	return &auditEntry{
+		Wrapped:   base64.StdEncoding.EncodeToString(wrapped),
+		PublicKey: base64.StdEncoding.EncodeToString(pub),
+	}, nil
 }
 
 // parseKeyringFile decodes and version-checks a keyring file.
@@ -387,7 +450,82 @@ func openKeyring(file keyringFile, rootKey []byte, wrongKeyHint string) (*Keyrin
 	if err := ring.SetActive(file.ActiveKID); err != nil {
 		return nil, fmt.Errorf("keys: active key id %q is not in the keyring", file.ActiveKID)
 	}
+	if file.Audit != nil {
+		audit, err := openAudit(file.Audit, rootKey, wrongKeyHint)
+		if err != nil {
+			return nil, err
+		}
+		ring.audit = audit
+	}
 	return ring, nil
+}
+
+// openAudit unwraps the audit secret and checks the recorded public key against
+// it.
+//
+// The check is the reason the public key can be stored in clear: without it, an
+// attacker who can edit the keyring file could replace the public key with one
+// whose private half they hold, and a log they signed would then verify against
+// this keyring. The secret itself is authenticated by its AEAD, so they cannot
+// change that instead.
+func openAudit(entry *auditEntry, rootKey []byte, wrongKeyHint string) (*AuditKey, error) {
+	wrapped, err := base64.StdEncoding.DecodeString(entry.Wrapped)
+	if err != nil {
+		return nil, fmt.Errorf("keys: the audit key is not valid base64: %w", err)
+	}
+	secret, err := openKey(rootKey, wrapped, auditAAD())
+	if err != nil {
+		return nil, fmt.Errorf("%w (%s)", err, wrongKeyHint)
+	}
+	defer clear(secret)
+
+	audit, err := AuditKeyFromSecret(secret)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := audit.Public()
+	if err != nil {
+		return nil, err
+	}
+	recorded, err := base64.StdEncoding.DecodeString(entry.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("keys: the audit public key is not valid base64: %w", err)
+	}
+	if !bytes.Equal(pub, recorded) {
+		return nil, fmt.Errorf(
+			"keys: the audit public key in this keyring does not belong to its audit secret; " +
+				"the file has been modified")
+	}
+	return audit, nil
+}
+
+// PublicAuditKey reads the audit public key out of a keyring file without
+// opening it.
+//
+// It needs no root key, which is what makes it useful: an operator can publish
+// the key an auditor will verify against without the auditor ever holding
+// anything that opens the keyring. What it cannot do is authenticate the value
+// it read -- the file is untrusted until a root key opens it. Whoever verifies a
+// log against a key obtained this way is trusting the same file an attacker
+// would have edited; the key belongs in the operator's own records, and that is
+// what `blindbucket audit pubkey` prints it for.
+func PublicAuditKey(data []byte) (ed25519.PublicKey, error) {
+	file, err := parseKeyringFile(data)
+	if err != nil {
+		return nil, err
+	}
+	if file.Audit == nil {
+		return nil, ErrNoAuditKey
+	}
+	pub, err := base64.StdEncoding.DecodeString(file.Audit.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("keys: the audit public key is not valid base64: %w", err)
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("keys: the audit public key is %d bytes, want %d",
+			len(pub), ed25519.PublicKeySize)
+	}
+	return pub, nil
 }
 
 func sortedKeys(m map[string][KeySize]byte) []string {

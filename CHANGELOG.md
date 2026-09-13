@@ -10,6 +10,49 @@ is version `1` and is specified in [docs/FORMAT.md](docs/FORMAT.md). A change to
 it would be a change to that number, announced here, and objects written under
 version 1 would keep being readable.
 
+## [Unreleased]
+
+### Added
+
+**A cryptographically verifiable audit log.** The gateway can keep a record of
+what it served — which credential, which operation, which object, what came
+back — in a form an intruder cannot quietly edit. Every entry carries the hash of
+the entry before it, and the chain is signed with Ed25519 at intervals. Editing,
+reordering, removing or splicing anything before the last signature changes a
+hash that signature covers.
+
+Verification needs the public key and nothing else. An auditor can be handed the
+log without being handed anything that could write one, and
+`blindbucket audit verify --public-key <key> audit.log` is the whole check.
+`--keyring` additionally decrypts the object names, which is a separate
+privilege and needs the keyring.
+
+Object names in the log are **encrypted**, with the deterministic per-segment
+construction of [ADR-015](docs/adr/ADR-015-object-name-encryption.md) — its first
+shipped caller. A log can therefore leave the host without giving away what the
+encrypted bucket does not.
+
+Two limits are stated rather than glossed. Entries written after the last
+checkpoint are chained but **not** signed: whoever holds the file can drop them,
+and what remains verifies. `audit verify --expect <seq>:<hash>` compares against
+a checkpoint recorded elsewhere and closes that gap; a test asserts the
+undetectability so the limit cannot be lost. And this is **not** rollback
+protection — `THREAT_MODEL` §5.1 is unchanged, and nothing here makes a read
+consult the log.
+
+Off unless `audit.log` names a path. With `fail_closed` (the default) a gateway
+that can no longer record refuses the next request rather than serving on with a
+record known to be incomplete. Design, alternatives and measured costs:
+[ADR-016](docs/adr/ADR-016-audit-log.md); wire format:
+[FORMAT §14](docs/FORMAT.md).
+
+**`blindbucket audit`**, with `verify` and `pubkey`. **`keygen --add-audit-key`**
+gives an existing keyring an audit key; new keyrings get one.
+
+**`blindbucket_audit_failures_total` and `blindbucket_audit_broken`.** The
+counter above zero means the log has a gap; the gauge means the gateway is
+currently refusing traffic over it.
+
 ## [0.2.0] — 2026-09-12
 
 ### Added

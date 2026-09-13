@@ -65,6 +65,22 @@ data:
 
     crypto:
       log2_chunk_size: 16
+
+    # The audit log needs somewhere to write, and this container has
+    # readOnlyRootFilesystem: true. Uncomment together with the volume and mount
+    # marked "audit" below.
+    #
+    # Each replica writes its own chain -- that is the design, not a limitation:
+    # instances share no state, so they share no log (ADR-016). Verify them
+    # separately, or ship them somewhere that keeps them apart.
+    #
+    # Do not back this with an emptyDir. It is erased when the pod is replaced,
+    # and a record that disappears on the next rollout is not an audit log. Use a
+    # PersistentVolumeClaim, or a sidecar that ships the file off the node before
+    # the pod goes away.
+    # audit:
+    #   log: /var/lib/blindbucket/audit.log
+    #   fail_closed: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -142,6 +158,8 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/blindbucket, readOnly: true }
             - { name: keys, mountPath: /etc/blindbucket/keys, readOnly: true }
+            # audit: the one writable path this container gets.
+            # - { name: audit, mountPath: /var/lib/blindbucket }
 
       # Graceful shutdown is the process's own: on SIGTERM it stops accepting
       # connections and lets in-flight requests finish, up to its 30-second
@@ -157,6 +175,12 @@ spec:
       volumes:
         - name: config
           configMap: { name: blindbucket-config }
+        # audit: durable, and owned by the nonroot user the container runs as.
+        # A claim per pod, so the two replicas cannot write one chain between
+        # them -- which a StatefulSet's volumeClaimTemplates gives you and a
+        # Deployment does not.
+        # - name: audit
+        #   persistentVolumeClaim: { claimName: blindbucket-audit }
         - name: keys
           secret:
             secretName: blindbucket-keys
