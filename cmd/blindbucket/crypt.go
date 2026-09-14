@@ -32,6 +32,7 @@ func (c *cryptFlags) register(fs *flag.FlagSet) {
 }
 
 func (c *cryptFlags) loadKeyring() (*keys.Keyring, error) {
+	defer c.pass.wipe()
 	if c.keyring == "" {
 		return nil, errors.New("--keyring is required")
 	}

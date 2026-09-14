@@ -54,6 +54,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	defer pass.wipe()
 	if fs.NArg() != 1 {
 		fs.Usage()
 		return errUsage

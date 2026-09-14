@@ -55,6 +55,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	defer pass.wipe()
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {

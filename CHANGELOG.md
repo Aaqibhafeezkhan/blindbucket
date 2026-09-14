@@ -53,6 +53,16 @@ gives an existing keyring an audit key; new keyrings get one.
 counter above zero means the log has a gap; the gauge means the gateway is
 currently refusing traffic over it.
 
+### Fixed
+
+**`keygen --add` asked for the passphrase twice on a terminal**, once to open
+the keyring and once to write it back — and the second answer, which was not
+confirmed, became the passphrase the keyring was re-sealed under. A typo there
+sealed the keyring under something nobody knew, losing every object encrypted
+under it. A command now resolves the passphrase once and remembers it for the
+rest of the run. Deployments passing `--passphrase-file` or the environment
+variable were never affected.
+
 ## [0.2.0] — 2026-09-12
 
 ### Added

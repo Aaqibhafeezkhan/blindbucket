@@ -19,6 +19,9 @@ const passphraseEnv = "BLINDBUCKET_PASSPHRASE"
 // passphrase that protects a keyring.
 type passphraseFlags struct {
 	file string
+	// resolved caches the first answer, so that a command asks at most once.
+	// See resolve.
+	resolved []byte
 }
 
 func (p *passphraseFlags) register(fs *flag.FlagSet) {
@@ -30,7 +33,34 @@ func (p *passphraseFlags) register(fs *flag.FlagSet) {
 //
 // confirm re-prompts for verification, which matters when the passphrase is
 // about to protect newly generated keys: a typo there is unrecoverable.
+//
+// The first answer is remembered for the rest of the command. A command that
+// opens a keyring and then writes it back -- `keygen --add` is one -- would
+// otherwise prompt twice, and the second answer, unconfirmed, would silently
+// become the new passphrase: a typo there seals the keyring under something
+// nobody knows, which loses every object encrypted under it.
+//
+// The caller gets a copy and may wipe it. The remembered one is wiped by wipe.
 func (p *passphraseFlags) resolve(prompt string, confirm bool) ([]byte, error) {
+	if p.resolved == nil {
+		pass, err := p.read(prompt, confirm)
+		if err != nil {
+			return nil, err
+		}
+		p.resolved = pass
+	}
+	return bytes.Clone(p.resolved), nil
+}
+
+// wipe forgets the remembered passphrase. Commands defer it; as everywhere else
+// in this program, it narrows the window rather than closing it (ADR-002).
+func (p *passphraseFlags) wipe() {
+	clear(p.resolved)
+	p.resolved = nil
+}
+
+// read obtains the passphrase from the first source that has one.
+func (p *passphraseFlags) read(prompt string, confirm bool) ([]byte, error) {
 	if p.file != "" {
 		data, err := os.ReadFile(p.file)
 		if err != nil {

@@ -47,6 +47,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	defer pass.wipe()
 	if *out == "" {
 		fs.Usage()
 		return errors.New("--out is required")

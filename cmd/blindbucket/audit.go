@@ -74,6 +74,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	defer pass.wipe()
 	if *keyring == "" {
 		fs.Usage()
 		return errors.New("--keyring is required")
@@ -170,6 +171,7 @@ Flags:
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	defer pass.wipe()
 	paths := fs.Args()
 	if len(paths) == 0 {
 		fs.Usage()
