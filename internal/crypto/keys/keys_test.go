@@ -477,3 +477,42 @@ func TestRemoveRetiresAKey(t *testing.T) {
 	}
 }
 
+// TestUnrecordedCreationDateStaysUnknown pins the reporting of a keyring
+// written before creation dates were recorded. Add stamps a key with the
+// current time, which is right for a key being made and wrong for one being
+// read back: reporting today would make an ancient key look fresh in `keys
+// list` and in the age metric.
+func TestUnrecordedCreationDateStaysUnknown(t *testing.T) {
+	t.Parallel()
+
+	ring := newTestKeyring(t, "kid-a")
+	data, err := ring.Marshal(testPassphrase, testKDF)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var file map[string]any
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	entries, ok := file["keys"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("keys is %T, want one entry", file["keys"])
+	}
+	entry, ok := entries[0].(map[string]any)
+	if !ok {
+		t.Fatalf("key entry is %T, want an object", entries[0])
+	}
+	delete(entry, "created")
+	stripped, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	loaded, err := LoadKeyring(stripped, testPassphrase)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if created, ok := loaded.Created("kid-a"); ok {
+		t.Errorf("Created reported %s, want unknown", created)
+	}
+}

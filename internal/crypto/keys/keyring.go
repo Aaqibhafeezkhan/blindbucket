@@ -476,7 +476,13 @@ func openKeyring(file keyringFile, rootKey []byte, wrongKeyHint string) (*Keyrin
 			return nil, err
 		}
 		clear(kek)
-		if !entry.Created.IsZero() {
+		// Add stamped the key with the current time, which is right for a key
+		// being created and wrong for one being read back. A file that records
+		// no date -- every keyring written before the field existed -- leaves
+		// the key's age unknown, and saying so beats reporting today.
+		if entry.Created.IsZero() {
+			delete(ring.created, entry.KID)
+		} else {
 			ring.created[entry.KID] = entry.Created
 		}
 	}

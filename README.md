@@ -370,6 +370,9 @@ requests the audit log could not record, and each one is a gap in it. The rest
 cover requests, upstream latency, bytes by direction and streams in flight;
 `blindbucket_active_streams` is the one that should track memory, since memory is
 a function of streams in flight and not of object size.
+`blindbucket_keyring_key_created_timestamp_seconds` is the input to a rotation
+decision — `time() - max(...)` over it is the age of the oldest key still in the
+keyring, which is the number a rotation policy is actually written against.
 
 ## The audit log
 

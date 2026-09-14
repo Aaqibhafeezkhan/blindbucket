@@ -82,6 +82,7 @@ Flags:
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(
 		collectors.ProcessCollectorOpts{}))
 	metrics := obs.NewMetrics(registry)
+	metrics.KeyringLoaded(ring)
 
 	client, err := upstream.New(upstream.Config{
 		Endpoint:        cfg.Upstream.Endpoint,

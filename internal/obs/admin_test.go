@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -108,6 +110,66 @@ func TestMetricsAreExported(t *testing.T) {
 	}
 }
 
+// TestKeyringMetricsExposeKeyAge covers the number a rotation policy is written
+// against. Key age used to be visible only by opening the keyring by hand.
+func TestKeyringMetricsExposeKeyAge(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	m := NewMetrics(registry)
+	m.KeyringLoaded(testKeyring{
+		active: "2026-09",
+		created: map[string]time.Time{
+			"2026-08": time.Unix(1_756_000_000, 0),
+			"2026-09": time.Unix(1_758_000_000, 0),
+			// A keyring written before creation dates existed. Its age is
+			// unknown, and an unknown age must not be exported as a number: a
+			// zero would read as 1970 and alert on every scrape.
+			"legacy": {},
+		},
+	})
+
+	h := handlerFor(t, AdminConfig{Registry: registry})
+	code, body := get(t, h, "/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("metrics = %d, want 200", code)
+	}
+	for _, want := range []string{
+		`blindbucket_keyring_keys 3`,
+		`blindbucket_keyring_key_created_timestamp_seconds{active="false",kid="2026-08"} 1.756e+09`,
+		`blindbucket_keyring_key_created_timestamp_seconds{active="true",kid="2026-09"} 1.758e+09`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing from /metrics: %s", want)
+		}
+	}
+	if strings.Contains(body, `kid="legacy"`) {
+		t.Error("a key with no recorded creation date was exported with one")
+	}
+}
+
+// testKeyring is the KeyringInfo a real *keys.Keyring satisfies. The interface
+// exists so that this package does not import the crypto packages, and the
+// stub is what that buys.
+type testKeyring struct {
+	active  string
+	created map[string]time.Time
+}
+
+func (k testKeyring) ActiveKID() string { return k.active }
+
+func (k testKeyring) KIDs() []string {
+	out := make([]string, 0, len(k.created))
+	for kid := range k.created {
+		out = append(out, kid)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (k testKeyring) Created(kid string) (time.Time, bool) {
+	t, ok := k.created[kid]
+	return t, ok
+}
+
 // The status label is bucketed by class. The exact code belongs in a log line;
 // as a label it would be unbounded enough to matter.
 func TestStatusLabelIsBounded(t *testing.T) {
@@ -134,4 +196,5 @@ func TestNilMetricsRecordNothing(*testing.T) {
 	m.IntegrityFailure(KindChunk)
 	m.AuthFailure("x")
 	m.ChecksumMismatch("x")
+	m.KeyringLoaded(testKeyring{})
 }

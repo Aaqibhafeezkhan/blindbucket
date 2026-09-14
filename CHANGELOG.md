@@ -63,6 +63,11 @@ for the active key and for the last one — nothing here can see the bucket, so
 whether an object still references the key is the operator's to establish, with
 a `--dry-run` rotation.
 
+**`blindbucket_keyring_keys` and `blindbucket_keyring_key_created_timestamp_seconds`.**
+Key age as a metric rather than as a thing to remember. A timestamp rather than
+an age, so that `time() - max(...)` is the age at scrape time and no gauge has
+to be refreshed to stay true.
+
 ### Fixed
 
 **`keygen --add` asked for the passphrase twice on a terminal**, once to open
@@ -72,6 +77,11 @@ sealed the keyring under something nobody knew, losing every object encrypted
 under it. A command now resolves the passphrase once and remembers it for the
 rest of the run. Deployments passing `--passphrase-file` or the environment
 variable were never affected.
+
+**A keyring that records no creation dates reported today's.** Loading stamped
+each key with the time it was read, which made every key in a keyring written
+before dates existed look fresh in `keys list` and in the new metric. Such a key
+is now reported as unknown, which is what it is.
 
 ## [0.2.0] — 2026-09-12
 

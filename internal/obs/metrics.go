@@ -52,6 +52,17 @@ type Metrics struct {
 	checksumMismatch  *prometheus.CounterVec
 	auditFailures     prometheus.Counter
 	auditBroken       prometheus.Gauge
+	keyringKeys       prometheus.Gauge
+	keyringCreated    *prometheus.GaugeVec
+}
+
+// KeyringInfo is what this package needs to know about a keyring. It is an
+// interface so that observability stays out of the crypto packages' import
+// graph, in the direction ADR-002 keeps them.
+type KeyringInfo interface {
+	KIDs() []string
+	ActiveKID() string
+	Created(kid string) (time.Time, bool)
 }
 
 // NewMetrics registers the collectors and returns them.
@@ -118,6 +129,49 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "1 while the audit log cannot be written. With fail_closed the " +
 				"gateway is refusing requests.",
 		}),
+
+		// Key age is the input to a rotation decision, and until these existed
+		// the only way to see it was to open the keyring by hand. A creation
+		// timestamp rather than an age, because a gauge that has to be
+		// refreshed to stay true is a gauge that will be wrong: `time() -
+		// blindbucket_keyring_key_created_timestamp_seconds` is the age, at
+		// scrape time, without this process doing anything.
+		keyringKeys: factory.gauge(prometheus.GaugeOpts{
+			Name: "blindbucket_keyring_keys",
+			Help: "Key-encryption keys in the loaded keyring. Keys accumulate " +
+				"until `blindbucket keys remove` retires one.",
+		}),
+
+		keyringCreated: factory.gaugeVec(prometheus.GaugeOpts{
+			Name: "blindbucket_keyring_key_created_timestamp_seconds",
+			Help: "When each key-encryption key was created, as a Unix timestamp. " +
+				"Absent for keys whose keyring records no date.",
+		}, []string{"kid", "active"}),
+	}
+}
+
+// KeyringLoaded records the keyring the gateway started with.
+//
+// Called once, at startup: a keyring only changes through the CLI, and that
+// takes a restart to reach a running gateway. The label cardinality is the
+// number of KEKs in the file, which is a handful.
+func (m *Metrics) KeyringLoaded(ring KeyringInfo) {
+	if m == nil || ring == nil {
+		return
+	}
+	kids := ring.KIDs()
+	m.keyringKeys.Set(float64(len(kids)))
+	m.keyringCreated.Reset()
+	for _, kid := range kids {
+		created, ok := ring.Created(kid)
+		if !ok || created.IsZero() {
+			continue
+		}
+		active := "false"
+		if kid == ring.ActiveKID() {
+			active = "true"
+		}
+		m.keyringCreated.WithLabelValues(kid, active).Set(float64(created.Unix()))
 	}
 }
 
