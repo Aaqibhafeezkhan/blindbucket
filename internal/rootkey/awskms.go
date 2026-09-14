@@ -35,6 +35,12 @@ type KMSConfig struct {
 	// KMS with; leave it empty for AWS.
 	Endpoint string
 
+	// Context is the encryption context new root keys are sealed under, on top
+	// of the fixed pair every blindbucket keyring carries. Operators add
+	// something that identifies the deployment, and then a key policy can
+	// require it. See defaultContext.
+	Context map[string]string
+
 	HTTPClient *http.Client
 	// now is injectable so the signature of a test is deterministic.
 	now func() time.Time
@@ -53,6 +59,30 @@ type KMS struct {
 	signer   *v4.Signer
 	creds    aws.Credentials
 	endpoint string
+}
+
+// contextKey is the fixed encryption-context entry every keyring sealed by this
+// build carries.
+//
+// Fixed rather than derived from the deployment, so that a key policy can
+// require it with a single kms:EncryptionContext:blindbucket condition and no
+// per-environment editing. Anything identifying the environment is the
+// operator's to add through KMSConfig.Context.
+const contextKey = "blindbucket"
+
+// defaultContext returns the encryption context for a fresh root key: the fixed
+// entry, plus whatever the operator configured.
+//
+// The fixed entry wins a collision. It is what a key policy keys off, and a
+// configuration file must not be able to turn that condition off by overwriting
+// it with something else.
+func (k *KMS) defaultContext() map[string]string {
+	out := make(map[string]string, len(k.cfg.Context)+1)
+	for name, value := range k.cfg.Context {
+		out[name] = value
+	}
+	out[contextKey] = "root-key"
+	return out
 }
 
 // NewKMS validates the configuration and returns a source.
@@ -92,24 +122,34 @@ func NewKMS(cfg KMSConfig) (*KMS, error) {
 	}, nil
 }
 
-// Encrypt hands a fresh root key to KMS and returns the blob it gives back.
+// Encrypt hands a fresh root key to KMS and returns what a keyring must record
+// to get it back.
 //
-// Used by `blindbucket keygen`, never by the gateway.
-func (k *KMS) Encrypt(ctx context.Context, rootKey []byte) (string, error) {
+// Used by `blindbucket keygen`, never by the gateway. The reference is built
+// here rather than by the caller because the encryption context is part of it,
+// and only this side knows what was sent.
+func (k *KMS) Encrypt(ctx context.Context, rootKey []byte) (keys.RootKeyRef, error) {
 	var out struct {
 		CiphertextBlob string `json:"CiphertextBlob"`
 	}
-	in := map[string]string{
-		"KeyId":     k.cfg.KeyID,
-		"Plaintext": base64.StdEncoding.EncodeToString(rootKey),
+	encContext := k.defaultContext()
+	in := map[string]any{
+		"KeyId":             k.cfg.KeyID,
+		"Plaintext":         base64.StdEncoding.EncodeToString(rootKey),
+		"EncryptionContext": encContext,
 	}
 	if err := k.call(ctx, "Encrypt", in, &out); err != nil {
-		return "", err
+		return keys.RootKeyRef{}, err
 	}
 	if out.CiphertextBlob == "" {
-		return "", fmt.Errorf("rootkey: kms returned no ciphertext")
+		return keys.RootKeyRef{}, fmt.Errorf("rootkey: kms returned no ciphertext")
 	}
-	return out.CiphertextBlob, nil
+	return keys.RootKeyRef{
+		Source:     keys.SourceAWSKMS,
+		Ciphertext: out.CiphertextBlob,
+		KeyName:    k.cfg.KeyID,
+		Context:    encContext,
+	}, nil
 }
 
 // RootKey asks KMS to decrypt the stored root key.
@@ -128,7 +168,14 @@ func (k *KMS) RootKey(ctx context.Context, ref keys.RootKeyRef) ([]byte, error) 
 	// KeyId is sent even though a symmetric decrypt does not need it: it makes
 	// KMS refuse a blob produced under a different key rather than opening it,
 	// so a keyring from another environment fails loudly here.
-	in := map[string]string{"CiphertextBlob": ref.Ciphertext, "KeyId": k.cfg.KeyID}
+	in := map[string]any{"CiphertextBlob": ref.Ciphertext, "KeyId": k.cfg.KeyID}
+	// The context that encrypted, not the one configured now. They are usually
+	// the same, but a keyring written before encryption contexts existed has
+	// none, and it must keep opening: KMS requires an exact match, so guessing
+	// the current one would lock out every keyring made by an earlier build.
+	if len(ref.Context) > 0 {
+		in["EncryptionContext"] = ref.Context
+	}
 	if err := k.call(ctx, "Decrypt", in, &out); err != nil {
 		return nil, err
 	}

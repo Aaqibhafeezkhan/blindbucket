@@ -34,6 +34,7 @@ func newRootKeySource(cfg config.Keys) (rootkey.Source, error) {
 			SecretAccessKey: cfg.AWSKMS.SecretAccessKey,
 			SessionToken:    cfg.AWSKMS.SessionToken,
 			Endpoint:        cfg.AWSKMS.Endpoint,
+			Context:         cfg.AWSKMS.EncryptionContext,
 		})
 	default:
 		return nil, fmt.Errorf("unknown keys.provider %q", cfg.Provider)

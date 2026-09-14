@@ -3,6 +3,7 @@ package rootkey
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"strings"
 	"testing"
@@ -87,17 +88,23 @@ func roundTrip(t *testing.T, src Source, source string, keyName string) {
 	if err != nil {
 		t.Fatalf("NewRootKey: %v", err)
 	}
-	ciphertext, err := src.Encrypt(ctx, root)
+	ref, err := src.Encrypt(ctx, root)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if strings.Contains(ciphertext, string(root)) {
+	if strings.Contains(ref.Ciphertext, string(root)) {
 		t.Fatal("the ciphertext contains the plaintext key")
 	}
+	// The reference is what lands in the keyring file, so the source has to
+	// describe itself correctly or the file cannot be opened again.
+	if ref.Source != source {
+		t.Errorf("the reference names source %q, want %q", ref.Source, source)
+	}
+	if ref.KeyName != keyName {
+		t.Errorf("the reference names key %q, want %q", ref.KeyName, keyName)
+	}
 
-	back, err := src.RootKey(ctx, keys.RootKeyRef{
-		Source: source, Ciphertext: ciphertext, KeyName: keyName,
-	})
+	back, err := src.RootKey(ctx, ref)
 	if err != nil {
 		t.Fatalf("RootKey: %v", err)
 	}
@@ -130,13 +137,11 @@ func TestIntegrationVaultSealsAKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRootKey: %v", err)
 	}
-	ciphertext, err := v.Encrypt(ctx, root)
+	ref, err := v.Encrypt(ctx, root)
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	data, err := ring.MarshalWithRootKey(root, keys.RootKeyRef{
-		Source: keys.SourceVaultTransit, Ciphertext: ciphertext, KeyName: "blindbucket",
-	})
+	data, err := ring.MarshalWithRootKey(root, ref)
 	if err != nil {
 		t.Fatalf("MarshalWithRootKey: %v", err)
 	}
@@ -146,15 +151,15 @@ func TestIntegrationVaultSealsAKeyring(t *testing.T) {
 	if bytes.Contains(data, []byte(`"kdf"`)) && bytes.Contains(data, []byte("argon2id")) {
 		t.Error("a service-sealed keyring carries KDF parameters it cannot use")
 	}
-	ref, err := keys.ReadRootKeyRef(data)
+	stored, err := keys.ReadRootKeyRef(data)
 	if err != nil {
 		t.Fatalf("ReadRootKeyRef: %v", err)
 	}
-	if ref.Source != keys.SourceVaultTransit {
-		t.Fatalf("the keyring names source %q, want %q", ref.Source, keys.SourceVaultTransit)
+	if stored.Source != keys.SourceVaultTransit {
+		t.Fatalf("the keyring names source %q, want %q", stored.Source, keys.SourceVaultTransit)
 	}
 
-	back, err := v.RootKey(ctx, ref)
+	back, err := v.RootKey(ctx, stored)
 	if err != nil {
 		t.Fatalf("RootKey: %v", err)
 	}
@@ -258,5 +263,61 @@ func TestSourcesValidateTheirConfiguration(t *testing.T) {
 	}
 	if _, err := NewKMS(KMSConfig{Region: "r", KeyID: "k"}); err == nil {
 		t.Error("a KMS source without credentials was accepted")
+	}
+}
+
+// TestIntegrationKMSBindsTheEncryptionContext is the point of sending one at
+// all: the ciphertext is bound to it, so a keyring whose recorded context has
+// been edited fails to open rather than opening under someone else's terms.
+//
+// The same call also has to keep working for a keyring written before contexts
+// existed, which carries none.
+func TestIntegrationKMSBindsTheEncryptionContext(t *testing.T) {
+	k := newTestKMS(t)
+	ctx := context.Background()
+
+	root, err := keys.NewRootKey()
+	if err != nil {
+		t.Fatalf("NewRootKey: %v", err)
+	}
+	ref, err := k.Encrypt(ctx, root)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if ref.Context[contextKey] == "" {
+		t.Fatalf("the reference records no %q entry: %v", contextKey, ref.Context)
+	}
+
+	tampered := ref
+	tampered.Context = map[string]string{contextKey: "something-else"}
+	if _, err := k.RootKey(ctx, tampered); err == nil {
+		t.Error("KMS opened the blob under a context it was not sealed with")
+	}
+	dropped := ref
+	dropped.Context = nil
+	if _, err := k.RootKey(ctx, dropped); err == nil {
+		t.Error("KMS opened the blob with no context at all")
+	}
+
+	// A keyring from an earlier build: sealed without a context, and it must
+	// still open.
+	var out struct {
+		CiphertextBlob string `json:"CiphertextBlob"`
+	}
+	in := map[string]any{
+		"KeyId":     k.cfg.KeyID,
+		"Plaintext": base64.StdEncoding.EncodeToString(root),
+	}
+	if err := k.call(ctx, "Encrypt", in, &out); err != nil {
+		t.Fatalf("Encrypt without a context: %v", err)
+	}
+	back, err := k.RootKey(ctx, keys.RootKeyRef{
+		Source: keys.SourceAWSKMS, Ciphertext: out.CiphertextBlob, KeyName: k.cfg.KeyID,
+	})
+	if err != nil {
+		t.Fatalf("a keyring sealed before encryption contexts existed no longer opens: %v", err)
+	}
+	if !bytes.Equal(root, back) {
+		t.Error("the key that came back is not the key that went in")
 	}
 }

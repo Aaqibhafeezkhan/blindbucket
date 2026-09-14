@@ -99,11 +99,18 @@ func NewVault(cfg VaultConfig) (*Vault, error) {
 	return &Vault{cfg: cfg, client: client}, nil
 }
 
-// Encrypt hands a fresh root key to Vault and returns what it stores.
+// Encrypt hands a fresh root key to Vault and returns what a keyring must
+// record to get it back.
 //
 // Used by `blindbucket keygen`, never by the gateway: a running instance only
 // ever decrypts.
-func (v *Vault) Encrypt(ctx context.Context, rootKey []byte) (string, error) {
+//
+// No Transit "context" is sent, which is the one place this differs from the
+// KMS source. Transit accepts a context only for keys created with key
+// derivation enabled, so sending one would fail against an ordinary Transit key
+// and silently change what the key is. Narrowing access to this use of a
+// Transit key is done with a policy on its own mount path instead.
+func (v *Vault) Encrypt(ctx context.Context, rootKey []byte) (keys.RootKeyRef, error) {
 	var out struct {
 		Data struct {
 			Ciphertext string `json:"ciphertext"`
@@ -111,12 +118,16 @@ func (v *Vault) Encrypt(ctx context.Context, rootKey []byte) (string, error) {
 	}
 	body := map[string]string{"plaintext": base64.StdEncoding.EncodeToString(rootKey)}
 	if err := v.call(ctx, "encrypt", body, &out); err != nil {
-		return "", err
+		return keys.RootKeyRef{}, err
 	}
 	if out.Data.Ciphertext == "" {
-		return "", fmt.Errorf("rootkey: vault returned no ciphertext")
+		return keys.RootKeyRef{}, fmt.Errorf("rootkey: vault returned no ciphertext")
 	}
-	return out.Data.Ciphertext, nil
+	return keys.RootKeyRef{
+		Source:     keys.SourceVaultTransit,
+		Ciphertext: out.Data.Ciphertext,
+		KeyName:    v.cfg.KeyName,
+	}, nil
 }
 
 // RootKey asks Vault to decrypt the stored root key.
@@ -211,7 +222,10 @@ func (v *Vault) call(ctx context.Context, op string, in any, out any) error {
 // the only thing that ever hands a key to a service.
 type Source interface {
 	RootKey(ctx context.Context, ref keys.RootKeyRef) ([]byte, error)
-	Encrypt(ctx context.Context, rootKey []byte) (string, error)
+	// Encrypt seals a fresh root key and returns the reference a keyring file
+	// records: everything the next process needs to ask for it back, including
+	// any associated data the service bound the ciphertext to.
+	Encrypt(ctx context.Context, rootKey []byte) (keys.RootKeyRef, error)
 }
 
 var (

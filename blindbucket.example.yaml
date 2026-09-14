@@ -55,6 +55,12 @@ keys:
   #   access_key_id: ${AWS_ACCESS_KEY_ID}
   #   secret_access_key: ${AWS_SECRET_ACCESS_KEY}
   #   endpoint: ""                       # override for an AWS-compatible endpoint
+  #   # Added to the KMS encryption context, on top of the fixed
+  #   # blindbucket=root-key entry every keyring carries. Not a secret: it is
+  #   # logged in CloudTrail and recorded in the keyring. Its point is that a key
+  #   # policy can require it, narrowing a grant to this use of the key.
+  #   encryption_context:
+  #     deployment: prod-eu
 
 crypto:
   log2_chunk_size: 16                    # 64 KiB

@@ -68,6 +68,16 @@ Key age as a metric rather than as a thing to remember. A timestamp rather than
 an age, so that `time() - max(...)` is the age at scrape time and no gauge has
 to be refreshed to stay true.
 
+**An AWS KMS encryption context** on the sealed root key: always
+`blindbucket=root-key`, plus anything under `keys.awskms.encryption_context`. It
+puts a distinguishable value in CloudTrail and lets a key policy narrow a grant
+to this use of the key with a `kms:EncryptionContext:blindbucket` condition. The
+context is recorded in the keyring's `root_key` object, because decrypting
+requires exactly the context that encrypted. Keyrings sealed by earlier builds
+carry none and open unchanged; a keyring sealed *with* one cannot be opened by a
+build older than this, which is the only direction that breaks. Vault Transit
+gets no context and [ADR-013](docs/adr/ADR-013-root-key-sources.md) says why.
+
 ### Fixed
 
 **`keygen --add` asked for the passphrase twice on a terminal**, once to open

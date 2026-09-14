@@ -60,6 +60,27 @@ name turns "decryption failed" into "this keyring was sealed under transit key
 `prod`, but `staging` is configured" — which is the misconfiguration that
 actually happens.
 
+### KMS ciphertexts carry an encryption context
+
+A root key sealed by KMS is sealed under an encryption context — AWS's own
+associated data, the same idea [ADR-002](ADR-002-key-hierarchy.md) applies to
+every wrapped DEK. It always contains `blindbucket=root-key`, and
+`keys.awskms.encryption_context` adds whatever identifies the deployment.
+
+It buys two things a key id alone does not. The value appears in CloudTrail, so
+a decrypt of *this* key is distinguishable from every other use of the same KMS
+key; and a key policy can require it with a `kms:EncryptionContext:blindbucket`
+condition, which narrows a grant to this use rather than to the key. The context
+is recorded in the keyring file because decrypting requires exactly the context
+that encrypted, and a keyring must be openable from the file alone. Recording it
+in an untrusted file costs nothing: KMS binds the ciphertext to the context, so
+an edited one fails to decrypt rather than opening anything.
+
+Vault Transit gets none, and that is not an oversight. Transit accepts a context
+only for keys created with derivation enabled, so sending one would fail against
+an ordinary Transit key. The equivalent there is a policy on the key's own mount
+path.
+
 ### Both clients are hand-written against the HTTP API
 
 Neither source uses its vendor's SDK. [ADR-003](ADR-003-upstream-client.md) took
@@ -122,3 +143,12 @@ somebody chose in order to have a fallback.
 - The keyring file gained an optional `root_key` object. Files written before it
   are passphrase keyrings and still load; the format version did not change,
   because the field is additive and its absence already means something.
+- `root_key` later gained an optional `context`, for the KMS encryption context.
+  Older keyrings carry none and are decrypted with none, as they were encrypted.
+  This is the one direction that is not compatible: a keyring sealed *with* a
+  context cannot be opened by a build that predates the field, because that
+  build would ask KMS to decrypt without it.
+- A `Source` returns the whole `RootKeyRef` from `Encrypt` rather than a bare
+  ciphertext string. What has to be recorded to reopen a keyring is the
+  service's business, not the CLI's; the encryption context is the field that
+  made the difference matter.

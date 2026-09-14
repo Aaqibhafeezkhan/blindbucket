@@ -174,6 +174,12 @@ type AWSKMSKeys struct {
 	AccessKeyID     string `yaml:"access_key_id"`
 	SecretAccessKey string `yaml:"secret_access_key"`
 	SessionToken    string `yaml:"session_token"`
+	// EncryptionContext is added to the AWS KMS encryption context of a keyring
+	// sealed by `keygen`, on top of the fixed "blindbucket" entry every one
+	// carries. Put something that identifies the deployment here, and a key
+	// policy can then require it. It is not a secret: KMS logs it in
+	// CloudTrail, and the keyring file records it.
+	EncryptionContext map[string]string `yaml:"encryption_context"`
 	// Endpoint overrides kms.<region>.amazonaws.com, for LocalStack and for
 	// AWS-compatible endpoints.
 	Endpoint string `yaml:"endpoint"`

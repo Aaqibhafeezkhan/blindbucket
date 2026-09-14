@@ -97,25 +97,14 @@ func sealKeyring(
 	}
 	defer clear(root)
 
-	ciphertext, err := source.Encrypt(ctx, root)
+	// The reference comes back from the source rather than being assembled
+	// here: what has to be recorded is the service's business, and for KMS it
+	// includes the encryption context the ciphertext is bound to.
+	ref, err := source.Encrypt(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	return ring.MarshalWithRootKey(root, rootKeyRefFor(cfg, ciphertext))
-}
-
-// rootKeyRefFor records what has to be asked to get the root key back.
-func rootKeyRefFor(cfg config.Keys, ciphertext string) keys.RootKeyRef {
-	switch cfg.Provider {
-	case "vault":
-		return keys.RootKeyRef{
-			Source: keys.SourceVaultTransit, Ciphertext: ciphertext, KeyName: cfg.Vault.KeyName,
-		}
-	default:
-		return keys.RootKeyRef{
-			Source: keys.SourceAWSKMS, Ciphertext: ciphertext, KeyName: cfg.AWSKMS.KeyID,
-		}
-	}
+	return ring.MarshalWithRootKey(root, ref)
 }
 
 func createKeyring(
