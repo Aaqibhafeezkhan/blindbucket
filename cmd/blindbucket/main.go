@@ -31,6 +31,7 @@ func commands() []command {
 	return []command{
 		{"serve", "run the S3 gateway", runServe},
 		{"keygen", "create a keyring, or add a key to an existing one", runKeygen},
+		{"keys", "list the keys in a keyring, or retire one", runKeys},
 		{"gc", "remove orphaned multipart manifests", runGC},
 		{"rotate", "re-wrap data keys under a new KEK", runRotate},
 		{"audit", "verify the audit log, or print the key that verifies it", runAudit},

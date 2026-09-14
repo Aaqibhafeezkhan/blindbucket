@@ -197,6 +197,10 @@ Rotation replaces the KEK, not the DEK. A compromised DEK exposes its object unt
 object is re-encrypted. "Key rotation" in this project means KEK rotation, and the README
 must not imply more.
 
+A rotated-away KEK also keeps working until it is removed from the keyring: rotation
+re-wraps the objects, it does not retire the key. `blindbucket keys remove` is what does,
+and against a compromised KEK a rotation that is not followed by one has bought nothing.
+
 ### 5.7 Side channels on the proxy host
 
 Timing and cache attacks against the proxy host are out of scope (they fall under A5).

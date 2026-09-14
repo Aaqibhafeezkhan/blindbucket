@@ -25,7 +25,8 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
 > Key rotation, server-side copy, metrics and health endpoints are in, and the
 > keyring can be unsealed by Vault Transit or AWS KMS instead of a passphrase.
 > On `main` since, and **not** in `v0.2.0`: the
-> [audit log](#the-audit-log). See [Roadmap](#roadmap),
+> [audit log](#the-audit-log), and `blindbucket keys` — key ages, and the
+> removal that finishes a rotation. See [Roadmap](#roadmap),
 > [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -99,7 +100,7 @@ project.
 | Constant memory | `O(chunk size)` per active stream, independent of object size |
 | Statelessness | No local state; multipart state travels in an encrypted token |
 | Drop-in compatibility | Standard clients unchanged, only `--endpoint-url` |
-| Key rotation | KEK rotation by server-side copy; 1000 objects move 1.4 MiB, not 62.5 MiB |
+| Key rotation | KEK rotation by server-side copy; 1000 objects move 1.4 MiB, not 62.5 MiB, and `keys remove` retires the old key afterwards |
 
 ## Why not just use…
 
@@ -211,8 +212,10 @@ keeps its data key; only the key that wraps it changes, so the ciphertext never
 leaves the provider:
 
 ```sh
-./bin/blindbucket keygen --keyring keyring.json --kid 2026-10   # add the new KEK
+./bin/blindbucket keys list --keyring keyring.json                        # what is in there, and how old
+./bin/blindbucket keygen --out keyring.json --kid 2026-10 --add          # add the new KEK
 ./bin/blindbucket rotate --config blindbucket.yaml --to-kid 2026-10 s3://blindbucket-dev
+./bin/blindbucket keys remove --keyring keyring.json --force 2026-09     # retire the old one
 ```
 
 A thousand 64 KiB objects rotate in about a second and a half, moving 1.4 MiB
@@ -220,6 +223,13 @@ over the wire for 62.5 MiB of payload — and that per-object cost does not grow
 with object size. Clients may keep writing throughout: the rotation's final write
 is conditional on the ETag it started from, so a client write that lands in
 between wins and the object is skipped until the next run.
+
+The last step is the one that actually retires the key. Rotation moves objects
+onto the new KEK but leaves the old one in the keyring, where it goes on opening
+everything it ever wrapped — so a compromised key is still a working key until
+it is removed. `keys remove` needs `--force` because nothing in the keyring can
+see the bucket: run the rotation with `--dry-run` first and confirm it reports
+nothing left to move.
 
 ### Without a server
 

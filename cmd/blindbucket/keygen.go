@@ -56,16 +56,9 @@ Flags:
 		return err
 	}
 
-	keysCfg := config.Keys{Provider: "file"}
-	if *conf != "" {
-		cfg, err := config.Load(*conf)
-		if err != nil {
-			return err
-		}
-		keysCfg = cfg.Keys
-		if pass.file == "" {
-			pass.file = keysCfg.PassphraseFile
-		}
+	keysCfg, err := keysConfig(*conf, &pass)
+	if err != nil {
+		return err
 	}
 
 	switch {

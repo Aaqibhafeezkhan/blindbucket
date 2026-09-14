@@ -421,3 +421,59 @@ func mustObjectAAD(t *testing.T, kid, bucket, key string) []byte {
 	}
 	return aad
 }
+
+// TestRemoveRetiresAKey covers the half of rotation that takes a KEK out of
+// service. Until Remove existed, `rotate` moved objects onto a new key and the
+// old one kept opening everything it had ever wrapped.
+func TestRemoveRetiresAKey(t *testing.T) {
+	t.Parallel()
+
+	ring := newTestKeyring(t, "2026-08", "2026-09")
+	if err := ring.SetActive("2026-09"); err != nil {
+		t.Fatalf("SetActive: %v", err)
+	}
+	ctx := context.Background()
+	aad := mustObjectAAD(t, "2026-08", "b", "k")
+	wrapped, err := ring.Wrap(ctx, "2026-08", make([]byte, KeySize), aad)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Refusals first: both of these would produce a keyring that cannot serve.
+	if err := ring.Remove("2026-09"); err == nil {
+		t.Error("removing the active key was allowed")
+	}
+	if err := ring.Remove("nonexistent"); !errors.Is(err, ErrUnknownKID) {
+		t.Errorf("removing an absent key gave %v, want ErrUnknownKID", err)
+	}
+
+	if err := ring.Remove("2026-08"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if got := ring.KIDs(); len(got) != 1 || got[0] != "2026-09" {
+		t.Errorf("keyring holds %v, want only the active key", got)
+	}
+	// The point of the whole operation: what the retired key wrapped no longer
+	// opens, and says so as a missing key rather than as an authentication
+	// failure.
+	if _, err := ring.Unwrap(ctx, "2026-08", wrapped, aad); !errors.Is(err, ErrUnknownKID) {
+		t.Errorf("unwrapping under the removed key gave %v, want ErrUnknownKID", err)
+	}
+	if err := ring.Remove("2026-09"); err == nil {
+		t.Error("emptying the keyring was allowed")
+	}
+
+	// Removal must survive being written out, or it is undone by the next load.
+	data, err := ring.Marshal(testPassphrase, testKDF)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	loaded, err := LoadKeyring(data, testPassphrase)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if got := loaded.KIDs(); len(got) != 1 {
+		t.Errorf("the reloaded keyring holds %v, want one key", got)
+	}
+}
+

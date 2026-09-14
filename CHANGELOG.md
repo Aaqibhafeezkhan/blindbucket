@@ -53,6 +53,16 @@ gives an existing keyring an audit key; new keyrings get one.
 counter above zero means the log has a gap; the gauge means the gateway is
 currently refusing traffic over it.
 
+**`blindbucket keys`, with `list` and `remove`.** `list` shows what a keyring
+holds and how old each key is — the input to a rotation decision, which until
+now could only be had by reading the file. `remove` is the half of rotation that
+was missing: `rotate` re-wraps objects under a new KEK and leaves the old one in
+the keyring, where it goes on opening everything it ever wrapped, so a
+compromised key stayed a working key. Removal needs `--force`, and is refused
+for the active key and for the last one — nothing here can see the bucket, so
+whether an object still references the key is the operator's to establish, with
+a `--dry-run` rotation.
+
 ### Fixed
 
 **`keygen --add` asked for the passphrase twice on a terminal**, once to open

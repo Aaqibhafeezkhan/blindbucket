@@ -117,6 +117,12 @@ model checks, or write a new one anyway.
   objects skipped for a conflict are picked up by the next one.
 - Objects the gateway did not write are counted and left alone. A bucket shared
   with other producers does not break a rotation.
+- Rotation is only half of retiring a key. It re-wraps the objects and leaves the
+  old KEK in the keyring, still able to open everything it ever wrapped;
+  `blindbucket keys remove` is the other half, and against a compromised KEK a
+  rotation without it has bought nothing. It is a separate command because only
+  an operator can know that no object references the key any more: this side can
+  see the keyring, not the bucket.
 - The upstream client gains `CopyObject` and `UploadPartCopy`. Rotation uses only
   the latter; both are now also used by the S3 `CopyObject` operation, which
   [ADR-012](ADR-012-copy-semantics.md) added on the same machinery — rotation is

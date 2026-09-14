@@ -84,16 +84,9 @@ Flags:
 	// needs no secret but trusts the file; opening the keyring re-derives the
 	// key from the secret and proves the recorded one belongs to it.
 	if *open {
-		keysCfg := config.Keys{Provider: "file"}
-		if *conf != "" {
-			cfg, err := config.Load(*conf)
-			if err != nil {
-				return err
-			}
-			keysCfg = cfg.Keys
-			if pass.file == "" {
-				pass.file = keysCfg.PassphraseFile
-			}
+		keysCfg, err := keysConfig(*conf, &pass)
+		if err != nil {
+			return err
 		}
 		ring, err := openKeyring(ctx, *keyring, keysCfg, &pass)
 		if err != nil {

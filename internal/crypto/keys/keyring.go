@@ -80,6 +80,40 @@ func (r *Keyring) Add(kid string, kek []byte) error {
 	return nil
 }
 
+// Remove deletes a KEK from the keyring.
+//
+// This is the second half of rotation, and the half that actually retires a
+// key: `rotate` moves objects onto a new KEK but leaves the old one in the
+// keyring, where it keeps opening everything it ever wrapped. Until it is gone,
+// a compromised KEK is still a working KEK.
+//
+// It is refused for the active key -- removing what new objects are being
+// wrapped under would break the next write -- and for the last key, which would
+// leave a keyring that cannot be loaded at all. What it cannot check is whether
+// objects still reference kid: that lives in the bucket, not here, and it is
+// why the caller is expected to have run a rotation first.
+func (r *Keyring) Remove(kid string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.keks[kid]; !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownKID, kid)
+	}
+	switch {
+	case kid == r.active:
+		return fmt.Errorf("keys: %q is the active key; make another key active before removing it", kid)
+	case len(r.keks) == 1:
+		return fmt.Errorf("keys: %q is the only key in the keyring", kid)
+	}
+	// Zero the map slot before deleting it. The value is an array, so it is
+	// stored in the map's own memory and this overwrites the key material
+	// itself; as everywhere else, the garbage collector may still hold a copy
+	// made earlier (ADR-002).
+	r.keks[kid] = [KeySize]byte{}
+	delete(r.keks, kid)
+	delete(r.created, kid)
+	return nil
+}
+
 // SetActive selects the KEK new data keys are wrapped under.
 func (r *Keyring) SetActive(kid string) error {
 	r.mu.Lock()

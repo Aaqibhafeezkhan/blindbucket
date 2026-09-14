@@ -125,6 +125,53 @@ func TestKeygenAddRotatesTheActiveKey(t *testing.T) {
 	}
 }
 
+func TestKeysRemoveNeedsForceAndRetires(t *testing.T) {
+	keyring := setupKeyring(t, "2026-08")
+	if err := run(t.Context(), []string{"keygen", "--out", keyring, "--kid", "2026-09", "--add"}); err != nil {
+		t.Fatalf("keygen --add: %v", err)
+	}
+
+	// Removing a key is the one irreversible edit to a keyring: every object
+	// still wrapped under it becomes unreadable, and nothing here can see the
+	// bucket to check. The default must therefore be a refusal.
+	err := run(t.Context(), []string{"keys", "remove", "--keyring", keyring, "2026-08"})
+	if err == nil {
+		t.Fatal("keys remove without --force was accepted")
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("the refusal does not say what is missing: %v", err)
+	}
+	if err := run(t.Context(), []string{"keys", "remove", "--keyring", keyring, "--force", "2026-09"}); err == nil {
+		t.Error("removing the active key was accepted")
+	}
+	// A typo in the key id must read as a typo, not as a warning about data loss.
+	if err := run(t.Context(), []string{"keys", "remove", "--keyring", keyring, "2026-07"}); err == nil ||
+		strings.Contains(err.Error(), "--force") {
+		t.Errorf("an unknown key id gave %v, want a plain not-found", err)
+	}
+
+	if err := run(t.Context(), []string{"keys", "remove", "--keyring", keyring, "--force", "2026-08"}); err != nil {
+		t.Fatalf("keys remove --force: %v", err)
+	}
+
+	data, err := os.ReadFile(keyring)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Re-sealed under the same passphrase, and holding only the active key.
+	ring, err := keys.LoadKeyring(data, []byte(testPassphrase))
+	if err != nil {
+		t.Fatalf("LoadKeyring after remove: %v", err)
+	}
+	if got := ring.KIDs(); len(got) != 1 || got[0] != "2026-09" {
+		t.Errorf("keyring holds %v, want only the active key", got)
+	}
+
+	if err := run(t.Context(), []string{"keys", "list", "--keyring", keyring}); err != nil {
+		t.Errorf("keys list: %v", err)
+	}
+}
+
 func TestDecryptFailsCleanly(t *testing.T) {
 	keyring := setupKeyring(t, "kid")
 	dir := t.TempDir()
@@ -182,6 +229,12 @@ func TestCommandDispatch(t *testing.T) {
 	}
 	if err := run(t.Context(), []string{"encrypt"}); err == nil {
 		t.Error("encrypt without --keyring was accepted")
+	}
+	if err := run(t.Context(), []string{"keys"}); !errors.Is(err, errUsage) {
+		t.Errorf("keys without a subcommand returned %v, want errUsage", err)
+	}
+	if err := run(t.Context(), []string{"keys", "nonsense"}); err == nil {
+		t.Error("an unknown keys subcommand was accepted")
 	}
 }
 
