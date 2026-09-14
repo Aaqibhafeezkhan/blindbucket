@@ -50,6 +50,7 @@ func newRootKeySource(cfg config.Keys) (rootkey.Source, error) {
 // would fail with no explanation. This is the single place all three commands
 // open a keyring, so the rule is stated once.
 func openKeyring(ctx context.Context, path string, cfg config.Keys, pass *passphraseFlags) (*keys.Keyring, error) {
+	warnIfExposed("keyring", path)
 	//nolint:gosec // the path comes from the operator's own configuration.
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -90,4 +91,29 @@ func openKeyring(ctx context.Context, path string, cfg config.Keys, pass *passph
 	}
 	defer clear(root)
 	return keys.LoadKeyringWithRootKey(data, root)
+}
+
+// warnIfExposed reports a key file that more than its owner can read.
+//
+// A warning rather than a refusal: the file may be deliberately group-readable
+// for a service account, and refusing to start over it would be the gateway
+// deciding an operator's deployment for them. But a keyring whose permissions
+// were never narrowed is the ordinary way a passphrase stops being worth
+// anything, and nothing here used to say so -- THREAT_MODEL section 5.5 asks
+// for exactly this and left it to the reader.
+//
+// Written to stderr rather than the log, because every command that opens a
+// keyring should say it, and only one of them has a logger.
+func warnIfExposed(kind, path string) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		// Not readable, or not a file. Whatever the caller does next will
+		// report that properly.
+		return
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s %s is mode %04o -- readable beyond its owner. `chmod 600 %s`\n",
+			kind, path, mode, path)
+	}
 }

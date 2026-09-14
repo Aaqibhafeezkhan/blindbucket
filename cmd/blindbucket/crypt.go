@@ -36,6 +36,7 @@ func (c *cryptFlags) loadKeyring() (*keys.Keyring, error) {
 	if c.keyring == "" {
 		return nil, errors.New("--keyring is required")
 	}
+	warnIfExposed("keyring", c.keyring)
 	data, err := os.ReadFile(c.keyring)
 	if err != nil {
 		return nil, err

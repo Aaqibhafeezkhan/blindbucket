@@ -62,6 +62,7 @@ func (p *passphraseFlags) wipe() {
 // read obtains the passphrase from the first source that has one.
 func (p *passphraseFlags) read(prompt string, confirm bool) ([]byte, error) {
 	if p.file != "" {
+		warnIfExposed("passphrase file", p.file)
 		data, err := os.ReadFile(p.file)
 		if err != nil {
 			return nil, fmt.Errorf("reading the passphrase file: %w", err)

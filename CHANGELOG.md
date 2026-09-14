@@ -78,6 +78,10 @@ carry none and open unchanged; a keyring sealed *with* one cannot be opened by a
 build older than this, which is the only direction that breaks. Vault Transit
 gets no context and [ADR-013](docs/adr/ADR-013-root-key-sources.md) says why.
 
+**A warning for key files readable beyond their owner.** Every command that
+opens a keyring now says so when the keyring or a passphrase file is not mode
+`0600`. `THREAT_MODEL` §5.5 asked for this and left it to the reader.
+
 ### Fixed
 
 **`keygen --add` asked for the passphrase twice on a terminal**, once to open

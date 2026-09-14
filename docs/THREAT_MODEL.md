@@ -177,6 +177,9 @@ authenticated size is established when the object is actually read.
 Go does not guarantee that a buffer can be reliably overwritten — the garbage collector may
 copy it. Keys therefore cannot be scrubbed with confidence. Operational mitigations: disable
 core dumps, disable or encrypt swap, restrict keyring file permissions to the service user.
+The third is the only one this program can see, and every command that opens a keyring warns
+when the keyring or a passphrase file is readable beyond its owner. It warns rather than
+refuses: a file may be group-readable for a service account on purpose.
 
 Unsealing the keyring with Vault Transit or AWS KMS does **not** change this, and it is
 worth being explicit because it is the thing people assume it changes. The service
