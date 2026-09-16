@@ -148,9 +148,18 @@ versioning, for instance — that version is cryptographically valid: the proxy 
 and it is bound to the same bucket and key. Nothing in the format distinguishes "current"
 from "previous".
 
-Detecting this requires an external, authenticated index of versions, which would
-reintroduce the shared mutable state that the stateless design avoids (ADR-002). Mitigation
-is deferred to M6 and is currently **accepted risk**.
+Detecting this requires remembering, per object, which write is the current one. That is
+still **accepted risk**: nothing in this build checks it.
+
+The design is now decided rather than merely deferred
+([ADR-018](adr/ADR-018-rollback-detection.md)), and it narrows the objection this section
+used to state. What ADR-002 rejected was a *shared* index that a read's correctness depends
+on; a local, advisory one is neither shared nor on that path, because an empty index fails
+to detect rather than failing a read. What it costs instead is memory proportional to live
+objects — about 80 MiB per million — and a guarantee with a stated shape: rollback of a
+write the instance has seen before, with the first sighting of any object untrusted.
+
+Until that ships, this row stays **No**.
 
 The audit log of §5.8 does not change this, and is worth naming here because its
 name invites the assumption that it does. That log records what the gateway

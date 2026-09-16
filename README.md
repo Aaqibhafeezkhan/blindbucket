@@ -474,7 +474,7 @@ the gateway already costs per request.
 | M5 | `blindbucket rotate`, metrics and health, benchmarks, release | **done** |
 | — | `CopyObject` and `UploadPartCopy`, deferred from M5 | **done** |
 | — | Vault Transit and AWS KMS as root-key sources, deferred from M5 | **done** |
-| — | Cryptographically verifiable audit log, hash-chained and signed | **done**, unreleased |
+| — | Cryptographically verifiable audit log, hash-chained and signed | **done** |
 | M6 | Stretch: name encryption, presigned URLs, rollback protection | name encryption **done**; the rest open |
 
 M4 is the point the project becomes worth showing: multipart is what "works with real S3

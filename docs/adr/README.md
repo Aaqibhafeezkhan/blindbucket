@@ -23,12 +23,14 @@ rejected options is not a decision, it is a default.
 | [015](ADR-015-object-name-encryption.md) | Object name encryption: deterministic, per path segment | Accepted | M6 |
 | [016](ADR-016-audit-log.md) | A hash-chained, signed audit log, one chain per instance | Accepted | post-M5 |
 | [017](ADR-017-listing-order-under-name-encryption.md) | Listing order under name encryption: buffer and sort, bounded, or refuse | Accepted | M6 |
+| [018](ADR-018-rollback-detection.md) | Rollback detection: a local freshness index, trust on first use | Proposed | M6 |
 
-Every entry is Accepted. 015 and 017 became so together, when name encryption went from
-a primitive nothing called to something every operation goes through; until then 015 was
-Proposed because its decisions already constrained the code while the code did not yet
-use them, and 016 depended on it -- the audit log encrypts the names in its entries with
-015's primitive, which was its first shipped caller.
+Every entry is Accepted except 018, which is Proposed for the same reason 015 was: its
+decisions already constrain the code while the code does not yet use them. 015 and 017
+became Accepted together, when name encryption went from a primitive nothing called to
+something every operation goes through; 016 depended on 015 in the meantime -- the audit
+log encrypts the names in its entries with 015's primitive, which was its first shipped
+caller.
 
 The pair is worth reading in order, because each corrected the other. 017 closed the one
 question 015 left open, and the measurements it took to do that showed 015's key-expansion
@@ -36,6 +38,12 @@ figure was a best case quoted as a rule. Building 017 then corrected 017: the se
 state it expected to need turned out to be unnecessary, because S3's own pagination
 parameters already carry the whole resume state of a listing. Both corrections are in the
 documents rather than quietly dropped, which is the point of keeping them.
+
+018 is the decision 002 deferred. 002 rejected a version index in M0 and wrote "the
+rollback mitigation is deferred to M6" into its alternatives; 016 then declined to be that
+mitigation in its own words, so that a log named "audit" would not be read as one. 018
+re-examines what 002 actually rejected -- a *shared* index a read's correctness depends on
+-- and finds a local, advisory one is neither.
 
 ADR numbers reflect the order the decisions were identified, not the order they are made.
 010 and 011 were added in design version 0.2; 011 was decided in M0 because it governs what
