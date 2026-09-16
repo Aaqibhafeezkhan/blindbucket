@@ -1,11 +1,11 @@
 # Threat Model
 
-**Status:** Current as of `main`. Section 5.8, the audit log, is on `main` and not
-in any release yet ([ADR-016](adr/ADR-016-audit-log.md)); everything else stands
-as of `v0.2.0`, the release that closed the retry-substitution risk of section 5.2
-with part salts in the manifest
-([ADR-014](adr/ADR-014-part-salts-in-the-manifest.md)). Revised at every milestone
-that adds an attack surface.
+**Status:** Current as of `v0.3.0`, the release that made object names
+encryptable ([ADR-015](adr/ADR-015-object-name-encryption.md)) and shipped the
+audit log of section 5.8 ([ADR-016](adr/ADR-016-audit-log.md)). Section 4 is the
+one that changed most: names can now be hidden from the provider, and what that
+does **not** hide is written out there rather than left to the ADR. Revised at
+every milestone that adds an attack surface.
 
 Everything below is implemented and covered by the attack tests of section 7 --
 the segment format's own guarantees (chunk integrity, ordering, truncation
@@ -13,7 +13,7 @@ detection, binding to bucket and key), the HTTP surface, client authentication,
 and the multipart path including the manifest and the upload token. Where a
 mitigation is deferred rather than present, the entry says so and names the
 milestone.
-**Last updated:** 2026-09-12
+**Last updated:** 2026-09-16
 
 This document states precisely what blindbucket protects against and what it does not.
 It is deliberately explicit about residual risk. A security tool that overstates its

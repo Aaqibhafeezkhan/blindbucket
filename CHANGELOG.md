@@ -10,7 +10,7 @@ is version `1` and is specified in [docs/FORMAT.md](docs/FORMAT.md). A change to
 it would be a change to that number, announced here, and objects written under
 version 1 would keep being readable.
 
-## [Unreleased]
+## [0.3.0] — 2026-09-16
 
 ### Added
 
@@ -306,6 +306,40 @@ each key with the time it was read, which made every key in a keyring written
 before dates existed look fresh in `keys list` and in the new metric. Such a key
 is now reported as unknown, which is what it is.
 
+### Known limitations
+
+- **Object-name encryption is not a toggle.** An object lives at the encrypted
+  form of its key, so turning `names.encrypt` on hides everything written before
+  it and turning it off hides everything written since. There is no migration
+  command; moving an existing bucket across is a rewrite of every object's key.
+- **"Encrypted" names are confirmable by guessing, not unguessable.** The mapping
+  is deterministic, because a client naming one object has to reach it in one
+  request with no index. Deterministic encryption never hides equality, and
+  equality is what confirms a guessed name. `THREAT_MODEL` section 4 states what
+  is and is not hidden, and it is the paragraph to read before switching this on.
+- **A listing is bounded.** The provider orders by the encrypted key, so a prefix
+  is read whole and sorted before any of it is served. Past
+  `names.max_listing_keys` (default 100 000) a listing is refused rather than
+  answered in an order the client cannot use.
+- **Key length under name encryption** depends on a key's shape rather than a
+  single multiplier: 624 bytes of plaintext key for one long segment, 128 for a
+  path of four-character ones, because the synthetic IV is charged per segment. A
+  key past the limit is refused with `KeyTooLongError`.
+- **No `blindbucket reseal`.** Moving a keyring from one root-key source to
+  another still means creating a new keyring and rotating objects onto it.
+- **Presigned URLs** are refused, and **rollback to an older genuine version of an
+  object is still not detectable** — the audit log, despite the name, does not
+  change that (`THREAT_MODEL` section 5.1).
+- **Object tags** are refused rather than stored, because the provider would hold
+  them in the clear.
+- **The audit log is per instance**, has no cross-instance order, and entries
+  after its last checkpoint are chained but unsigned. All three are by design and
+  recorded in [ADR-016](docs/adr/ADR-016-audit-log.md).
+- **One benchmark cell** — 10 MiB uploads at 64 concurrent clients — runs at 18 %
+  of the direct path. The gateway's share is measured at 0.13 ms per request, so
+  the time is the provider's; why it behaves that way under this access pattern
+  is not established.
+
 ## [0.2.0] — 2026-09-12
 
 ### Added
@@ -514,6 +548,7 @@ figures and the methodology are in [bench/](bench/).
   of ten seconds, so the time is the provider's; why it behaves that way under
   this access pattern is not established.
 
-[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LennardGeissler/blindbucket/releases/tag/v0.1.0

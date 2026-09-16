@@ -4,19 +4,29 @@ What actually works, measured by pointing each client at the gateway and running
 it. Every result below came from a real client against a real MinIO, not from
 reading a specification.
 
-**Measured:** 2026-09-12, against `v0.2.0`.
+**Measured:** the client matrix on 2026-09-12 against `v0.2.0`, with object names
+in the clear. **AWS CLI and boto3 are re-run against every commit** by the
+`Client compatibility` CI job, so their rows are current for `v0.3.0`; `mc` and
+rclone have not been re-measured since, and are marked as of `v0.2.0` below.
+
+The **object-name encryption** rows were verified on 2026-09-16 with the AWS CLI
+against a real MinIO — a 40 MiB multipart round trip and a server-side copy of it
+with matching SHA-256, 250 objects listed complete and in order across 13 pages,
+and `aws s3 sync --delete` run twice with the second run doing nothing. They are
+not a re-run of the whole matrix, and this document does not claim they are.
+
 **Setup:** `docker compose up -d`, `blindbucket serve`, path-style, 64 KiB chunks.
 
 ---
 
 ## Summary
 
-| Client | Version tested | Status | Required settings |
-|---|---|---|---|
-| AWS CLI v2 | 2.36.43 | **Works** | none |
-| boto3 | 1.43.92 | **Works** | none |
-| MinIO client (`mc`) | RELEASE.2025-08-13 | **Works** | `allow_unsigned_payload: true` on the proxy, for multipart only |
-| rclone | 1.75.1 | **Works with settings** | `allow_unsigned_payload: true` on the proxy; `--ignore-checksum`; `--size-only` for `check` |
+| Client | Version tested | Status | Last measured | Required settings |
+|---|---|---|---|---|
+| AWS CLI v2 | 2.36.43 | **Works** | every commit, in CI | none |
+| boto3 | 1.43.92 | **Works** | every commit, in CI | none |
+| MinIO client (`mc`) | RELEASE.2025-08-13 | **Works** | `v0.2.0` | `allow_unsigned_payload: true` on the proxy, for multipart only |
+| rclone | 1.75.1 | **Works with settings** | `v0.2.0` | `allow_unsigned_payload: true` on the proxy; `--ignore-checksum`; `--size-only` for `check` |
 
 Multipart included since M4: each client was run with a file over its own
 threshold, so the parts, the manifest and the size arithmetic are all exercised by
@@ -224,8 +234,8 @@ everything else works.
 | **Objects not written by the gateway** | Refused with `ObjectNotEncrypted` rather than served. Mixing encrypted and unencrypted objects behind one endpoint would leave a client unable to tell which it got. | by design |
 | **Bucket sub-resources** | `?acl`, `?policy`, `?versioning`, `?lifecycle`, `?tagging` all return `NotImplemented`. | not planned |
 | **Server-side encryption headers** | Refused. The gateway encrypts already; accepting them would suggest a second layer that is not there. | by design |
-| **Object-name encryption (`names.encrypt`)** | Off by default. With it on, every operation the gateway serves is served: single objects, multipart, both copy paths, tagging, bulk delete and listing. `blindbucket rotate` and `gc` work too, and `gc` needs no name key because a manifest is bound to the stored key and lives at the hash of it. The remaining limit is which *listings* can be answered — see the row below. | M6 |
-| **Listings under name encryption** | Served, in the client's order and paginated, for a prefix up to `names.max_listing_keys` (default 100 000). The provider orders by the encrypted key, so the whole prefix is read and sorted before any of it is served — an unsorted listing makes `aws s3 sync --delete` delete objects that exist. A prefix past the bound is refused with `NotImplemented` naming the limit, rather than answered in an unusable order. A prefix not ending on `/` and a delimiter other than `/` are refused permanently: encryption is per path segment, and `/` is the one separator that survives it. | M6 |
+| **Object-name encryption (`names.encrypt`)** | Off by default. With it on, every operation the gateway serves is served: single objects, multipart, both copy paths, tagging, bulk delete and listing. `blindbucket rotate` and `gc` work too, and `gc` needs no name key because a manifest is bound to the stored key and lives at the hash of it. The remaining limit is which *listings* can be answered — see the row below. | by design |
+| **Listings under name encryption** | Served, in the client's order and paginated, for a prefix up to `names.max_listing_keys` (default 100 000). The provider orders by the encrypted key, so the whole prefix is read and sorted before any of it is served — an unsorted listing makes `aws s3 sync --delete` delete objects that exist. A prefix past the bound is refused with `NotImplemented` naming the limit, rather than answered in an unusable order. A prefix not ending on `/` and a delimiter other than `/` are refused permanently: encryption is per path segment, and `/` is the one separator that survives it. | by design |
 | **Switching `names.encrypt` on a bucket with objects** | Not a toggle. An object is stored under the encrypted form of its key, so turning it on hides everything written before and turning it off hides everything written since. Moving an existing bucket across is a rewrite of every object's key. | by design |
 | **Key length under name encryption** | A key S3 accepts can have no legal encrypted form, answered with `KeyTooLongError`. Where the limit sits depends on how many `/`-separated segments a key has: 624 bytes for one long segment, 128 for a path of four-character ones. | by design |
 
