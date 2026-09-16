@@ -1,11 +1,21 @@
 # Threat Model
 
-**Status:** Current as of `v0.3.0`, the release that made object names
-encryptable ([ADR-015](adr/ADR-015-object-name-encryption.md)) and shipped the
-audit log of section 5.8 ([ADR-016](adr/ADR-016-audit-log.md)). Section 4 is the
-one that changed most: names can now be hidden from the provider, and what that
-does **not** hide is written out there rather than left to the ADR. Revised at
-every milestone that adds an attack surface.
+**Status:** Current as of `v0.4.0`, the release in which the risk table below
+stopped having a row that says **No** while promising a mitigation. Rollback —
+a provider serving an older but genuine version of an object — is detectable
+since [ADR-018](adr/ADR-018-rollback-detection.md), and section 5.1 now spends
+most of its length on the *limits* of that, because they are the part worth
+reading: the first sighting of any object is trusted, and a tag says which write
+and never which is newer.
+
+Section 4 gained a paragraph in the other direction. A presigned URL
+([ADR-019](adr/ADR-019-presigned-urls.md)) carries the object's plaintext key to
+whoever holds the link, which is the one thing object-name encryption otherwise
+keeps out of sight — a different adversary from the rest of that section, and
+still a leak.
+
+Every remaining **No** in the table is a boundary of the design rather than an
+open item. Revised at every milestone that adds an attack surface.
 
 Everything below is implemented and covered by the attack tests of section 7 --
 the segment format's own guarantees (chunk integrity, ordering, truncation

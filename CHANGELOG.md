@@ -10,7 +10,7 @@ is version `1` and is specified in [docs/FORMAT.md](docs/FORMAT.md). A change to
 it would be a change to that number, announced here, and objects written under
 version 1 would keep being readable.
 
-## [Unreleased]
+## [0.4.0] — 2026-09-16
 
 ### Added
 
@@ -629,7 +629,8 @@ figures and the methodology are in [bench/](bench/).
   of ten seconds, so the time is the provider's; why it behaves that way under
   this access pattern is not established.
 
-[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LennardGeissler/blindbucket/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/LennardGeissler/blindbucket/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/LennardGeissler/blindbucket/releases/tag/v0.1.0

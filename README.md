@@ -19,15 +19,19 @@ Clients speak ordinary S3. The storage provider only ever sees ciphertext — ne
   as <code>make demo</code>.
 </sub></p>
 
-> **Status: `v0.3.0` — usable.** Standard S3 clients round-trip through the
-> gateway, multipart included: AWS CLI, boto3, `mc` and rclone all work, and a
-> 5 GiB `aws s3 cp` across two instances comes back with an identical SHA-256.
-> Key rotation, server-side copy, metrics and health endpoints are in, and the
-> keyring can be unsealed by Vault Transit or AWS KMS instead of a passphrase.
-> This release adds a signed [audit log](#the-audit-log), `blindbucket keys`, and
-> **object-name encryption** — off by default, and worth reading
-> [what it does and does not hide](docs/THREAT_MODEL.md) before switching on. See
-> [Roadmap](#roadmap), [CHANGELOG.md](CHANGELOG.md) and
+> **Status: `v0.4.0` — usable, and M6 is closed.** Standard S3 clients round-trip
+> through the gateway, multipart included: AWS CLI, boto3, `mc` and rclone all
+> work, and a 5 GiB `aws s3 cp` across two instances comes back with an identical
+> SHA-256. Key rotation, server-side copy, a signed audit log, object-name
+> encryption, metrics and health endpoints are in, and the keyring can be
+> unsealed by Vault Transit or AWS KMS instead of a passphrase.
+>
+> This release closes the last **No** in the threat model's own risk table.
+> **Rollback detection** tells that a provider served an older but genuine version
+> of an object — off by default, and worth reading
+> [what it does and does not promise](docs/THREAT_MODEL.md) first, because the
+> first read of any object is trusted. **Presigned URLs** are verified, for reads
+> only. See [Roadmap](#roadmap), [CHANGELOG.md](CHANGELOG.md) and
 > [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ---
@@ -137,7 +141,7 @@ in **[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)**.
 
 ```sh
 # Container: distroless, nonroot, no shell, 21 MB.
-docker pull ghcr.io/lennardgeissler/blindbucket:0.3.0
+docker pull ghcr.io/lennardgeissler/blindbucket:0.4.0
 
 # Or a binary, with checksums and an SBOM alongside it:
 #   https://github.com/LennardGeissler/blindbucket/releases
@@ -434,10 +438,13 @@ compares against a checkpoint recorded somewhere the attacker does not control.
 A test asserts that this truncation is undetectable, so the limit cannot be
 quietly lost.
 
-And it is **not rollback protection**. It records what the gateway served; no
-read consults it, and residual risk §5.1 is exactly as open as it was. Turning
-this log into a version index is a different feature with a different cost, and
-[ADR-002](docs/adr/ADR-002-key-hierarchy.md) has the argument against.
+And it is **not rollback protection**, which is a separate feature with a
+separate file and a separate key. This log records what the gateway served; no
+read consults it, and nothing in it is an authority on which version of an object
+is current. That job belongs to the index of
+[ADR-018](docs/adr/ADR-018-rollback-detection.md), and folding the two together
+was rejected there on lifetimes: an audit log is sized by request volume and
+rotated, while an index is sized by live objects and must not be rotated away.
 
 The design, the rejected alternatives — a Merkle tree, an HMAC, signing every
 entry, shipping the log upstream — and the measured costs are in
@@ -487,22 +494,26 @@ AWS credential chain is not used — KMS credentials are configured explicitly
 ([ADR-013](docs/adr/ADR-013-root-key-sources.md)). Object tags are refused rather than
 stored, because the provider would hold them in plaintext
 ([ADR-012](docs/adr/ADR-012-copy-semantics.md)). `ListMultipartUploads` is refused
-permanently and says why. Presigned URLs are verified but never issued — presigning
-is a computation the client does offline — and they read only: `GET` and `HEAD` are
-served, everything else a presigned URL can name is refused, because a URL is where a
-bearer credential gets copied ([ADR-019](docs/adr/ADR-019-presigned-urls.md)). Rollback detection is off by default and bounded in three ways
-that are stated rather than implied: the first read of any object is trusted, a copied
-object is trusted once more after the copy, and a tag says *which* write and not *which is
-newer* — so where several instances write the same objects, a peer's write and a
-provider's rollback look the same
-([ADR-018](docs/adr/ADR-018-rollback-detection.md)). Object-name encryption covers every
-operation the gateway serves, with one bound: a listing is read whole and sorted before any of it is served,
-so a prefix beyond `names.max_listing_keys` is refused rather than answered in an order
-that can make a client delete data ([ADR-017](docs/adr/ADR-017-listing-order-under-name-encryption.md)). The audit log is per instance and has no cross-instance
-order, and entries after its last checkpoint are chained but unsigned — both by
-design, both in [ADR-016](docs/adr/ADR-016-audit-log.md). And one benchmark cell is
-documented as the provider's behaviour rather than explained; the gateway's share of it is
-measured at 0.13 ms per request.
+permanently and says why. A presigned URL can only *read*: `GET` and `HEAD` are served and
+everything else is refused, so the browser-upload case is not covered
+([ADR-019](docs/adr/ADR-019-presigned-urls.md)). And one benchmark cell is documented as
+the provider's behaviour rather than explained; the gateway's share of it is measured at
+0.13 ms per request.
+
+**What is bounded rather than missing**, because a bound stated is worth more than a
+feature implied. **Rollback detection** is off by default and limited three ways: the
+first read of any object is trusted, a copied object is trusted once more after the copy,
+and a tag says *which* write and never *which is newer* — so where several instances write
+the same objects, a peer's write and a provider's rollback are the same observation
+([ADR-018](docs/adr/ADR-018-rollback-detection.md)). **Object-name encryption** covers
+every operation the gateway serves, with one limit: a listing is read whole and sorted
+before any of it is served, so a prefix beyond `names.max_listing_keys` is refused rather
+than answered in an order that can make a client delete data
+([ADR-017](docs/adr/ADR-017-listing-order-under-name-encryption.md)). **The audit log** is
+per instance and has no cross-instance order, and entries after its last checkpoint are
+chained but unsigned — both by design, both in
+[ADR-016](docs/adr/ADR-016-audit-log.md). And a **presigned URL carries the object's
+plaintext key**, which is the one thing name encryption otherwise keeps out of sight.
 
 **Unsealing the keyring.** The root key can come from a passphrase, from Vault's Transit
 engine or from AWS KMS, and the keyring file records which one sealed it — so a keyring
