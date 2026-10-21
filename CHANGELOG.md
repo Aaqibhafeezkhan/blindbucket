@@ -34,6 +34,8 @@ version 1 would keep being readable.
 
 - **A client's conditional write is no longer carried out unconditionally.** `If-None-Match: *` and `If-Match` on `PutObject`, `CompleteMultipartUpload` and `CopyObject` were dropped without a word, so "create only if absent" could overwrite an object. They now go to the provider with the write, under name encryption too, and a condition that does not hold is answered `412`. Where the provider ignores them, as Garage v2.4.1 does, the client gets what the provider does ([#168](https://github.com/LennardGeissler/blindbucket/issues/168), [COMPATIBILITY.md](docs/COMPATIBILITY.md#a-clients-own-conditional-writes)).
 
+- **A copy whose ETag matches is no longer refused because of a date.** With both `x-amz-copy-source-if-match` and `x-amz-copy-source-if-unmodified-since` on a `CopyObject` or `UploadPartCopy`, the gateway answered `412` when the source had changed after the date even though the ETag matched, where S3 makes the copy. A matching `if-match` now decides, as the CopyObject reference and RFC 9110 section 13.2.2 describe; a malformed date is still refused. The `if-none-match` and `if-modified-since` pair is unchanged, because S3's answer for a non-matching ETag with a date that fails is not documented and has not been measured ([#90](https://github.com/LennardGeissler/blindbucket/issues/90)). `rotate` and `migrate-names` send `if-match` alone and are not affected.
+
 ## [1.5.1] — 2026-10-21
 
 **A security fix.** Three request bodies are now checked against the signature

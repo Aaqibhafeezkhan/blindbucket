@@ -274,8 +274,25 @@ func parseCopySource(raw string) (copySource, *s3api.Error) {
 // S3 evaluates these against the source, and a failure is 412 rather than the
 // 304 the equivalent request headers would produce on a GET: this is a write,
 // and there is no cached copy for the client to fall back on.
+//
+// They are not independent. The CopyObject reference says that when
+// x-amz-copy-source-if-match is true and x-amz-copy-source-if-unmodified-since
+// is false, S3 copies. RFC 9110 section 13.2.2 gives the plain headers the same
+// precedence: a matching ETag is the stronger statement about the representation,
+// so If-Unmodified-Since is consulted only when If-Match is absent. Evaluating
+// each header alone would refuse a copy S3 makes, with a 412 the client cannot
+// fix. (A date that cannot be read is still the client's mistake, and is refused
+// either way.)
+//
+// The pair x-amz-copy-source-if-none-match and -if-modified-since is not
+// reordered. The reference documents one of its two cases, a matching excluded
+// ETag with a true date condition, which is a 412 here as it is there. The
+// other case, a non-matching ETag with a false date condition, is not
+// documented, and RFC 9110 would copy where this refuses. That needs measuring
+// against S3 before it is changed.
 func checkCopyConditions(h http.Header, etag string, modified time.Time) *s3api.Error {
-	if want := h.Get("X-Amz-Copy-Source-If-Match"); want != "" && !etagMatches(want, etag) {
+	ifMatch := h.Get("X-Amz-Copy-Source-If-Match")
+	if ifMatch != "" && !etagMatches(ifMatch, etag) {
 		return s3api.ErrPreconditionFailed.WithMessage(
 			"the copy source does not have the expected ETag")
 	}
@@ -289,7 +306,10 @@ func checkCopyConditions(h http.Header, etag string, modified time.Time) *s3api.
 			return s3api.ErrInvalidArgument.WithMessage(
 				"x-amz-copy-source-if-unmodified-since is not a valid HTTP date")
 		}
-		if modified.After(since) {
+		// A failed if-match returned above, so a non-empty one has matched, and
+		// a matching ETag decides: the date is read, to refuse one that is
+		// malformed, but not held against the copy.
+		if ifMatch == "" && modified.After(since) {
 			return s3api.ErrPreconditionFailed.WithMessage(
 				"the copy source was modified after the given time")
 		}
