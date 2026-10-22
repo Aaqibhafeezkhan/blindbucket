@@ -10,6 +10,7 @@ package s3api
 import (
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -101,12 +102,25 @@ type Request struct {
 	PartNumber int
 }
 
+// bucketSubResource is a bucket-level sub-resource: the operation it selects,
+// and the method that selects it.
+//
+// The method belongs in the table rather than at the call site. Checked
+// alongside the operation, a sub-resource named with any other method is
+// refused by name; checked as a condition for recognising the sub-resource at
+// all, it was dropped and the request served as whatever the method alone
+// described -- DELETE ?delete as DeleteBucket.
+type bucketSubResource struct {
+	op     Operation
+	method string
+}
+
 // bucketQueryOps maps a bucket-level sub-resource to its operation. Only these
 // are served; every other sub-resource is refused.
-var bucketQueryOps = map[string]Operation{
-	"location": OpGetBucketLocation,
-	"delete":   OpDeleteObjects,
-	"uploads":  OpListMultipartUploads,
+var bucketQueryOps = map[string]bucketSubResource{
+	"location": {OpGetBucketLocation, http.MethodGet},
+	"delete":   {OpDeleteObjects, http.MethodPost},
+	"uploads":  {OpListMultipartUploads, http.MethodGet},
 }
 
 // ignorableParams are query parameters that carry no meaning for the service.
@@ -309,19 +323,16 @@ func routeBucket(r *http.Request, bucket string) (Request, *Error) {
 	// operation, or one of the parameters that shape a listing. Anything else
 	// names something this build does not implement, and answering it as a
 	// listing would silently ignore what the client asked for.
+	//
+	// The whole query is scanned before the operation is decided. Returning the
+	// operation from inside the loop made the answer depend on which key the
+	// map happened to yield first: ?uploads&acl was a ListMultipartUploads with
+	// ?acl ignored most of the time and a refusal the rest, from one call to the
+	// next on the same request.
+	var subResources []string
 	for name := range query {
-		if op, known := bucketQueryOps[name]; known {
-			switch {
-			case op == OpGetBucketLocation && r.Method == http.MethodGet:
-				req.Op = OpGetBucketLocation
-				return req, nil
-			case op == OpDeleteObjects && r.Method == http.MethodPost:
-				req.Op = OpDeleteObjects
-				return req, nil
-			case op == OpListMultipartUploads && r.Method == http.MethodGet:
-				req.Op = OpListMultipartUploads
-				return req, nil
-			}
+		if _, known := bucketQueryOps[name]; known {
+			subResources = append(subResources, name)
 			continue
 		}
 		if ignorableParams[strings.ToLower(name)] || presignParams[name] {
@@ -334,6 +345,27 @@ func routeBucket(r *http.Request, bucket string) (Request, *Error) {
 			return Request{Bucket: bucket, Op: OpUnsupported}, ErrNotImplemented.WithMessage(
 				"the bucket sub-resource %q is not implemented in this build", name)
 		}
+	}
+
+	// Two sub-resources name two operations and only one can be served, so
+	// neither is: ?location&uploads was a GetBucketLocation or a
+	// ListMultipartUploads depending on map order, and guessing is the thing
+	// this router does not do. Sorted, so the message is the same every time.
+	if len(subResources) > 1 {
+		slices.Sort(subResources)
+		return unsupported(req), ErrInvalidRequest.WithMessage(
+			"a request cannot carry the bucket sub-resources ?%s together",
+			strings.Join(subResources, " and ?"))
+	}
+	if len(subResources) == 1 {
+		name := subResources[0]
+		sub := bucketQueryOps[name]
+		if r.Method != sub.method {
+			return unsupported(req), ErrNotImplemented.WithMessage(
+				"?%s on a bucket is %s only, not %s", name, sub.method, r.Method)
+		}
+		req.Op = sub.op
+		return req, nil
 	}
 
 	switch r.Method {

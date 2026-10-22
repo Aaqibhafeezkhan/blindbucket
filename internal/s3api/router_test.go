@@ -226,6 +226,112 @@ func TestRouteRefusesBucketSubResources(t *testing.T) {
 	}
 }
 
+// TestRouteRefusesABucketSubResourceWithTheWrongMethod keeps a named
+// sub-resource from being dropped in favour of the operation the method alone
+// describes. DELETE ?delete was served as DeleteBucket and PUT ?delete as
+// CreateBucket: the client named the sub-resource and an unrelated operation
+// ran, the destructive one included.
+func TestRouteRefusesABucketSubResourceWithTheWrongMethod(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		method string
+		target string
+	}{
+		{http.MethodDelete, "/bucket?delete"},
+		{http.MethodGet, "/bucket?delete"},
+		{http.MethodPut, "/bucket?delete"},
+		{http.MethodHead, "/bucket?delete"},
+		{http.MethodPut, "/bucket?location"},
+		{http.MethodDelete, "/bucket?location"},
+		{http.MethodPost, "/bucket?location"},
+		{http.MethodPut, "/bucket?uploads"},
+		{http.MethodDelete, "/bucket?uploads"},
+		{http.MethodHead, "/bucket?uploads"},
+	} {
+		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+			t.Parallel()
+			got, err := Route(request(t, tc.method, tc.target), "")
+			if err == nil || err.Code != "NotImplemented" {
+				t.Fatalf("returned %v, want NotImplemented", err)
+			}
+			if got.Op != OpUnsupported {
+				t.Errorf("op = %s, want %s", got.Op, OpUnsupported)
+			}
+		})
+	}
+}
+
+// TestRouteRefusesTwoBucketSubResources covers a query naming two operations,
+// which map order used to decide between.
+func TestRouteRefusesTwoBucketSubResources(t *testing.T) {
+	t.Parallel()
+
+	const want = `a request cannot carry the bucket sub-resources ?delete and ?location and ?uploads together`
+	for _, target := range []string{
+		"/bucket?location&uploads",
+		"/bucket?uploads&location",
+		"/bucket?delete&location",
+		"/bucket?delete&uploads&location",
+	} {
+		got, err := Route(request(t, http.MethodGet, target), "")
+		if err == nil || err.Code != "InvalidRequest" {
+			t.Errorf("%q returned %v, want InvalidRequest", target, err)
+			continue
+		}
+		if got.Op != OpUnsupported {
+			t.Errorf("%q op = %s, want %s", target, got.Op, OpUnsupported)
+		}
+		// The names are sorted, so the message does not depend on map order
+		// either. Checking the longest case is enough to pin the ordering.
+		if target == "/bucket?delete&uploads&location" && err.Message != want {
+			t.Errorf("message = %q, want %q", err.Message, want)
+		}
+	}
+}
+
+// TestRouteBucketQueryIsDeterministic pins the property the cases above rest
+// on: the answer is a function of the request, not of Go's map iteration order.
+//
+// Each of these carries a sub-resource the router serves next to one it does
+// not. Deciding the operation from inside the scan returned before reaching the
+// second, so each was served about six times in seven and refused the rest --
+// which also means ?acl was silently ignored rather than refused, the one thing
+// the bucket router exists to prevent.
+func TestRouteBucketQueryIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		method string
+		target string
+	}{
+		{http.MethodGet, "/bucket?uploads&acl"},
+		{http.MethodGet, "/bucket?location&acl"},
+		{http.MethodPost, "/bucket?delete&acl"},
+		{http.MethodGet, "/bucket?location&uploads&acl"},
+	} {
+		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+			t.Parallel()
+			// Enough runs that a one-in-seven divergence is not missed: the
+			// chance of 2000 draws all landing the same way is negligible.
+			first, firstErr := Route(request(t, tc.method, tc.target), "")
+			if firstErr == nil {
+				t.Fatalf("returned no error, want a refusal; op = %s", first.Op)
+			}
+			for i := 0; i < 2000; i++ {
+				got, err := Route(request(t, tc.method, tc.target), "")
+				if err == nil {
+					t.Fatalf("run %d returned no error, want a refusal; op = %s", i, got.Op)
+				}
+				if err.Code != firstErr.Code || err.Message != firstErr.Message {
+					t.Fatalf("run %d returned %s %q, run 0 returned %s %q",
+						i, err.Code, err.Message, firstErr.Code, firstErr.Message)
+				}
+			}
+		})
+	}
+}
+
 // TestRouteVirtualHostedStyle covers the addressing form AWS now prefers, where
 // the bucket is a subdomain rather than the first path segment.
 func TestRouteVirtualHostedStyle(t *testing.T) {
