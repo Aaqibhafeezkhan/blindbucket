@@ -400,6 +400,15 @@ first: the format can be reviewed, fuzzed and measured before any HTTP is involv
 ./bin/blindbucket inspect big.tar.zst.bb   # what the file says it is, with no key in sight
 ```
 
+This works with any root-key source, not only a passphrase. For a keyring sealed
+by Vault Transit or AWS KMS, `--config` names the provider to ask, exactly as
+`keys list` takes it:
+
+```sh
+./bin/blindbucket decrypt --keyring keyring.json --config blindbucket.yaml \
+  -i big.tar.zst.bb -o restored.tar.zst
+```
+
 </details>
 
 ## Numbers

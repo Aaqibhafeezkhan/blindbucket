@@ -186,6 +186,7 @@ _blindbucket() {
     encrypt)
       _arguments \
         '--chunk-size-log2[chunk size as a power of two]:exponent' \
+        '--config[configuration file naming the root-key provider]:file:_files' \
         '-i[input file, or - for stdin]:file:_files' \
         '--keyring[keyring file]:file:_files' \
         '-o[output file, or - for stdout]:file:_files' \
@@ -193,6 +194,7 @@ _blindbucket() {
       ;;
     decrypt)
       _arguments \
+        '--config[configuration file naming the root-key provider]:file:_files' \
         '-i[input file, or - for stdin]:file:_files' \
         '--keyring[keyring file]:file:_files' \
         '-o[output file, or - for stdout]:file:_files' \
